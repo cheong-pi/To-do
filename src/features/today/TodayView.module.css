@@ -1,0 +1,823 @@
+.shell {
+  width: min(980px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: max(38px, env(safe-area-inset-top)) 0 max(80px, env(safe-area-inset-bottom));
+}
+
+.header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: start;
+  margin-bottom: 26px;
+}
+
+.kicker {
+  margin: 0 0 6px;
+  color: var(--color-brand-strong);
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.header h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(3.2rem, 8vw, 4rem);
+  font-weight: 400;
+  line-height: 0.96;
+}
+
+.summary {
+  max-width: 650px;
+  margin: 12px 0 0;
+  color: var(--color-muted);
+  line-height: 1.55;
+}
+
+.loginCard,
+.tabs,
+.mainPanel,
+.sidePanel > section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  box-shadow: var(--shadow);
+}
+
+.loginCard {
+  min-width: 210px;
+  padding: 14px 18px;
+  border-radius: var(--radius-medium);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.loginCard:hover {
+  border-color: var(--color-brand);
+  box-shadow: var(--shadow-pop);
+  transform: translateY(-1px);
+}
+
+.loginCard span,
+.compactSummary span {
+  display: block;
+  color: var(--color-muted);
+  font-size: 0.82rem;
+}
+
+.loginCard strong,
+.compactSummary strong {
+  display: block;
+  color: var(--color-ink);
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  position: sticky;
+  top: 12px;
+  z-index: 30;
+  margin-bottom: 22px;
+  padding: 6px;
+  border-radius: var(--radius-medium);
+}
+
+.tabs button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 1.08rem;
+  font-weight: 400;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.tabs button:hover {
+  background: var(--color-brand-softer);
+  color: var(--color-ink);
+}
+
+.tabs .activeTab {
+  background: var(--color-brand);
+  color: var(--color-ink);
+  box-shadow: 0 4px 14px -6px rgba(148, 101, 14, 0.8);
+}
+
+.tabContent {
+  display: grid;
+  gap: 12px;
+}
+
+.mainPanel,
+.statsPanel {
+  border-radius: var(--radius-large);
+  padding: 26px 28px;
+}
+
+.sectionHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.sectionHeader h2,
+.mainPanel h2,
+.sidePanel h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 400;
+}
+
+.sectionHeader p,
+.placeholderText,
+.editorMemo {
+  margin: 6px 0 0;
+  color: var(--color-muted);
+  line-height: 1.55;
+}
+
+.countBadge {
+  display: inline-flex;
+  min-width: 64px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--color-brand);
+  color: var(--color-brand-strong);
+  font-weight: 900;
+}
+
+.titleNav {
+  display: inline-grid;
+  grid-template-columns: 34px minmax(0, auto) 34px;
+  gap: 8px;
+  align-items: center;
+  justify-content: start;
+}
+
+.titleNav button {
+  min-width: 34px;
+  min-height: 34px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 1.35rem;
+  font-weight: 900;
+  line-height: 1;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.titleNav button:hover {
+  border-color: var(--color-brand);
+  background: var(--color-brand-softer);
+  transform: translateY(-1px);
+}
+
+.listMeta {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px 0 8px;
+}
+
+.addInlineButton {
+  min-width: 92px;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 4px 14px -6px rgba(148, 101, 14, 0.8);
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.addInlineButton:hover {
+  background: #d99d24;
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.taskList {
+  display: grid;
+  gap: 10px;
+}
+
+.taskStack {
+  display: grid;
+  gap: 8px;
+}
+
+.taskRow {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 72px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-medium);
+  background: var(--color-surface);
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.taskRow:hover {
+  border-color: var(--color-brand);
+  box-shadow: 0 6px 18px -12px rgba(120, 90, 30, 0.42);
+  transform: translateY(-1px);
+}
+
+.taskRow.done,
+.taskRow.cancelled {
+  opacity: 0.62;
+}
+
+.done {
+  background: var(--color-done);
+}
+
+.postponed {
+  background: var(--color-postponed);
+}
+
+.cancelled {
+  background: var(--color-cancelled);
+}
+
+.taskCheck {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 2.5px solid var(--color-line);
+  border-radius: 50%;
+  background: transparent;
+  color: transparent;
+  cursor: pointer;
+  font-weight: 900;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.taskCheck:hover {
+  border-color: var(--color-brand-strong);
+}
+
+.done .taskCheck {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  color: var(--color-ink);
+  animation: pop 0.42s cubic-bezier(0.2, 1.4, 0.5, 1);
+}
+
+.taskCheck:disabled {
+  cursor: default;
+}
+
+.taskBody {
+  min-width: 0;
+}
+
+.taskTopline,
+.taskMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.taskTopline span,
+.taskMeta span {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--color-brand-soft);
+  color: var(--color-brand-strong);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.taskTopline .deadlineWarm {
+  background: #ffd9cf;
+  color: #7d271a;
+}
+
+.taskTopline .deadlineHot {
+  background: #ffbfb2;
+  color: #6f1f14;
+}
+
+.taskTopline .repeatTag {
+  background: #d7f5c8;
+  color: #315b21;
+}
+
+.taskRow h3 {
+  margin: 6px 0;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.done h3 {
+  color: var(--color-subtle);
+  text-decoration: line-through;
+  text-decoration-color: var(--color-subtle);
+}
+
+.editButton,
+.editorActions button,
+.editorHeader button,
+.progressStepper button,
+.completeButton,
+.deleteButton {
+  min-height: 38px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.editButton:hover,
+.editorActions button:hover,
+.editorHeader button:hover,
+.progressStepper button:hover,
+.completeButton:hover,
+.deleteButton:hover {
+  border-color: var(--color-brand);
+  background: var(--color-brand-softer);
+  transform: translateY(-1px);
+}
+
+.editButton {
+  min-width: 62px;
+  padding: 0 12px;
+  font-weight: 800;
+}
+
+.headerActions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: end;
+}
+
+.compactSummary {
+  display: inline-grid;
+  grid-template-columns: auto auto auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.compactSummary span,
+.compactSummary strong {
+  font-size: 0.84rem;
+  font-weight: 900;
+}
+
+.editorPanel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-medium);
+  background: var(--color-surface);
+  box-shadow: var(--shadow);
+}
+
+.createPanel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1.5px dashed var(--color-brand);
+  border-radius: var(--radius-medium);
+  background: var(--color-brand-softer);
+}
+
+.editorHeader {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.formRow {
+  display: grid;
+  gap: 6px;
+}
+
+.formRow span,
+.checkboxRow {
+  color: var(--color-muted);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.formRow input,
+.formRow select,
+.formRow textarea {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  padding: 8px 10px;
+  outline: none;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.formRow input:focus,
+.formRow select:focus,
+.formRow textarea:focus {
+  border-color: var(--color-brand-strong);
+  box-shadow: 0 0 0 3px rgba(242, 194, 75, 0.28);
+}
+
+.formRow input:disabled,
+.formRow select:disabled,
+.formRow textarea:disabled {
+  background: #f2eee0;
+  color: #9b9275;
+  cursor: not-allowed;
+}
+
+.checkboxRow:has(input:disabled) {
+  opacity: 0.55;
+}
+
+.formRow textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.checkboxRow {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.checkboxRow input {
+  width: 18px;
+  height: 18px;
+}
+
+.tagBox {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: -4px;
+}
+
+.tagBox button {
+  min-height: 32px;
+  max-width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-brand-strong);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 900;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.tagBox button:hover {
+  border-color: var(--color-brand);
+  background: var(--color-brand-soft);
+  transform: translateY(-1px);
+}
+
+.editorHeader button {
+  padding: 0 12px;
+}
+
+.editorActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.editorActions button {
+  padding: 0 8px;
+}
+
+.editorActions button:first-child,
+.completeButton {
+  background: var(--color-brand);
+  font-weight: 900;
+}
+
+.completeButton:hover {
+  background: #d99d24;
+  color: #fff;
+}
+
+.editorFooter {
+  display: grid;
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+  gap: 8px;
+}
+
+.deleteButton {
+  border-color: var(--color-danger-soft);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  font-weight: 900;
+}
+
+.progressBox {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-medium);
+  background: var(--color-surface-soft);
+}
+
+.kindBox {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-medium);
+  background: var(--color-brand-softer);
+}
+
+.kindGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.kindButton {
+  display: grid;
+  gap: 4px;
+  min-height: 68px;
+  padding: 10px 8px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.kindButton strong {
+  font-size: 0.9rem;
+}
+
+.kindButton span,
+.fieldHint {
+  color: var(--color-muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.selectedKind {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  box-shadow: 0 4px 14px -6px rgba(148, 101, 14, 0.8);
+}
+
+.fieldHint {
+  margin: 0;
+}
+
+.repeatBox {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-medium);
+  background: var(--color-surface);
+}
+
+.colorField {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-medium);
+}
+
+.colorField legend {
+  padding: 0 6px;
+  color: var(--color-muted);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.colorGrid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.colorSwatch {
+  min-height: 38px;
+  border: 1px solid rgba(88, 74, 20, 0.3);
+  border-radius: var(--radius-small);
+  cursor: pointer;
+}
+
+.selectedColor {
+  border-color: #4e3f00;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.72), 0 0 0 2px rgba(78, 63, 0, 0.22);
+}
+
+.weekdayGrid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.weekdayGrid button {
+  min-height: 36px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.weekdayGrid .selectedWeekday {
+  background: var(--color-brand);
+}
+
+.progressStepper {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  gap: 6px;
+}
+
+.progressStepper input {
+  min-height: 38px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  text-align: center;
+}
+
+.wordProgress,
+.timerGrid {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.wordProgress {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  padding: 12px;
+  border-radius: var(--radius-medium);
+  background: var(--color-surface-soft);
+}
+
+.timerGrid span {
+  padding: 10px 12px;
+  border-radius: var(--radius-small);
+  background: var(--color-surface-soft);
+  font-weight: 700;
+}
+
+@media (max-width: 860px) {
+  .header {
+    grid-template-columns: 1fr;
+  }
+
+  .loginCard {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .shell {
+    width: min(100% - 20px, 1180px);
+    padding-top: 18px;
+  }
+
+  .tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .taskRow {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .editButton {
+    grid-column: 2;
+    width: 100%;
+  }
+
+  .editorActions,
+  .editorFooter {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .editorActions,
+  .editorFooter {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .titleNav {
+    grid-template-columns: 32px minmax(0, 1fr) 32px;
+    width: 100%;
+  }
+
+  .sectionHeader {
+    flex-direction: column;
+  }
+
+  .headerActions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+  }
+
+  .compactSummary {
+    justify-content: center;
+    white-space: normal;
+  }
+
+  .kindGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .colorGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .weekdayGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@keyframes pop {
+  0% {
+    transform: scale(0.4);
+  }
+  55% {
+    transform: scale(1.22);
+  }
+  100% {
+    transform: scale(1);
+  }
+}

@@ -4,6 +4,10 @@ Logs/
 Obj/
 Build/
 Builds/
+dist/
+node_modules/
+
+*.tsbuildinfo
 
 UserSettings/
 
