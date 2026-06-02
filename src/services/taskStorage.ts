@@ -16,10 +16,10 @@ export function loadStoredTasks(): Task[] {
 
   try {
     const parsed = JSON.parse(raw) as Partial<StoredTasks>;
-    if (parsed.version !== 1 || !Array.isArray(parsed.tasks)) return mockTasks;
-    return parsed.tasks;
+    if (parsed.version !== 1 || !Array.isArray(parsed.tasks)) return sanitizeTasks(mockTasks);
+    return sanitizeTasks(parsed.tasks);
   } catch {
-    return mockTasks;
+    return sanitizeTasks(mockTasks);
   }
 }
 
@@ -36,4 +36,11 @@ export function saveStoredTasks(tasks: Task[]) {
 
 function canUseStorage() {
   return typeof window !== "undefined" && "localStorage" in window;
+}
+
+function sanitizeTasks(tasks: Task[]) {
+  return tasks.map((task) => ({
+    ...task,
+    reminderAt: null
+  }));
 }

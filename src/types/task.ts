@@ -8,6 +8,8 @@ export type RepeatKind = "none" | "daily" | "weekly" | "date_range" | "monthly";
 
 export type TaskKindOption = "no_deadline" | "today" | "dday" | "repeat";
 
+export type TaskOwner = "task" | "schedule";
+
 export type TodaySortGroup =
   | "timed_today"
   | "pulled_to_today"
@@ -29,6 +31,7 @@ export type Task = {
   priority: TaskPriority;
   todaySortGroup: TodaySortGroup | null;
   taskKindOption?: TaskKindOption;
+  owner?: TaskOwner;
   postponeCount: number;
   progressPercent: number;
   remainingPercent: number;
@@ -41,6 +44,7 @@ export type Task = {
   repeatKind?: RepeatKind;
   repeatDaysOfWeek?: number[];
   repeatDayOfMonth?: number | null;
+  completedDates?: string[];
   isGenerated?: boolean;
   isManuallyEdited?: boolean;
   memo: string;

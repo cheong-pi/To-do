@@ -1,10 +1,19 @@
 export function registerServiceWorker() {
-  if (!import.meta.env.PROD) return;
   if (!("serviceWorker" in navigator)) return;
 
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {
-      // PWA support is useful but should not block the app shell.
-    });
+    navigator.serviceWorker.getRegistrations()
+      .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+      .catch(() => {
+        // Service worker cleanup is best-effort and should not block the app shell.
+      });
+
+    if ("caches" in window) {
+      caches.keys()
+        .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+        .catch(() => {
+          // Cache cleanup is best-effort and should not block the app shell.
+        });
+    }
   });
 }

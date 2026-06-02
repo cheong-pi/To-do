@@ -12,7 +12,7 @@ export function subscribeUserTasks(
   return onSnapshot(
     getTasksCollection(userId),
     (snapshot) => {
-      const tasks = snapshot.docs.map((item) => item.data() as Task);
+      const tasks = snapshot.docs.map((item) => sanitizeTask(item.data() as Task));
       onTasks(tasks);
     },
     onError
@@ -51,4 +51,11 @@ function getTasksCollection(userId: string) {
   }
 
   return collection(firebaseServices.db, "users", userId, "tasks");
+}
+
+function sanitizeTask(task: Task): Task {
+  return {
+    ...task,
+    reminderAt: null
+  };
 }

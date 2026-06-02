@@ -19,8 +19,7 @@ export function sortTodayTasks(tasks: Task[]) {
       if (timeDiff !== 0) return timeDiff;
 
       return (a.dueDate ?? "9999-12-31").localeCompare(b.dueDate ?? "9999-12-31");
-    })
-    .slice(0, 15);
+    });
 }
 
 function getGroupIndex(group: TodaySortGroup | null) {
