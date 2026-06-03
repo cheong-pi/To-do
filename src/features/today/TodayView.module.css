@@ -77,7 +77,7 @@
   position: sticky;
   top: 12px;
   z-index: 30;
-  margin-bottom: -1px;
+  margin-bottom: -3px;
   padding: 0 8px;
   border: 0;
   background: transparent;
@@ -98,7 +98,8 @@
   font-size: 0.96rem;
   font-weight: 600;
   padding: 0 14px;
-  transform: translateY(7px);
+  box-shadow: inset 0 -8px 12px -14px rgba(120, 90, 30, 0.6);
+  transform: translateY(10px);
   transition:
     background 0.18s ease,
     color 0.18s ease,
@@ -108,18 +109,18 @@
 
 .tabs button:nth-child(2n) {
   background: #ffe8a3;
-  transform: translateY(7px);
+  transform: translateY(10px);
 }
 
 .tabs button:nth-child(3n) {
   background: #fff7cf;
-  transform: translateY(7px);
+  transform: translateY(10px);
 }
 
 .tabs button:hover {
   background: #ffe680;
   color: var(--color-ink);
-  transform: translateY(4px);
+  transform: translateY(6px);
 }
 
 .tabs .activeTab {
@@ -127,8 +128,19 @@
   background: var(--color-surface);
   border-bottom-color: var(--color-surface);
   color: var(--color-ink);
-  box-shadow: 0 -4px 18px -10px rgba(120, 90, 30, 0.45);
-  transform: translateY(1px);
+  box-shadow: 0 -5px 20px -11px rgba(120, 90, 30, 0.5);
+  transform: translateY(0);
+}
+
+.tabs .activeTab::after {
+  position: absolute;
+  right: 10px;
+  bottom: -7px;
+  left: 10px;
+  height: 8px;
+  border-radius: 0 0 8px 8px;
+  background: var(--color-surface);
+  content: "";
 }
 
 .tabContent {
@@ -194,7 +206,7 @@
 .mainPanel h2,
 .sidePanel h2 {
   margin: 0;
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 1.5rem;
   font-weight: 700;
 }
@@ -231,7 +243,7 @@
 }
 
 .titleCount::after {
-  content: "개";
+  content: "";
 }
 
 .titleNav button {
@@ -486,6 +498,14 @@
   line-height: 1.45;
 }
 
+.syncScope {
+  display: block;
+  margin-top: 7px;
+  color: var(--color-subtle);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .segmentControl {
   display: inline-flex;
   gap: 6px;
@@ -525,6 +545,26 @@
   font-weight: 900;
   padding: 0 16px;
   white-space: nowrap;
+}
+
+.settingsAction:disabled {
+  border-color: var(--color-line-soft);
+  background: var(--color-surface-soft);
+  color: var(--color-subtle);
+  cursor: not-allowed;
+}
+
+.settingsActionGroup {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dangerAction {
+  border-color: var(--color-danger-soft);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
 }
 
 .helpGroup {
@@ -638,6 +678,94 @@
 
 .repeatCheckDone {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.38);
+}
+
+.reminderTray {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid rgba(217, 157, 36, 0.38);
+  border-radius: var(--radius-medium);
+  background: #fff7d7;
+}
+
+.reminderTrayHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.reminderTrayHeader strong {
+  color: var(--color-ink);
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.reminderTrayHeader span {
+  color: var(--color-brand-strong);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.reminderCards {
+  display: grid;
+  gap: 8px;
+}
+
+.reminderCard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(217, 157, 36, 0.24);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+}
+
+.reminderCard div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.reminderCard span,
+.reminderMore {
+  color: var(--color-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.reminderCard strong {
+  overflow: hidden;
+  color: var(--color-ink);
+  font-size: 0.94rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reminderActions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.reminderActions button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-soft);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.reminderMore {
+  margin: 0;
 }
 
 .taskRow {
@@ -839,6 +967,122 @@
   padding: 16px;
   border: 1.5px dashed var(--color-brand);
   border-radius: var(--radius-medium);
+  background: var(--color-brand-softer);
+}
+
+.schedulePanel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.schedulePanel .createPanel {
+  margin-bottom: 0;
+}
+
+.scheduleManager {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-medium);
+  background: var(--color-surface-soft);
+}
+
+.scheduleManagerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.scheduleManagerHeader strong {
+  color: var(--color-ink);
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.scheduleManagerHeader span {
+  color: var(--color-subtle);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.scheduleManageList {
+  display: grid;
+  gap: 8px;
+}
+
+.scheduleManageItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+}
+
+.scheduleManageInfo {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.scheduleManageInfo strong {
+  overflow: hidden;
+  color: var(--color-ink);
+  font-size: 0.94rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduleManageInfo em {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.scheduleTypeTag {
+  width: fit-content;
+  min-height: 22px;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand-soft);
+  color: var(--color-brand-strong);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.scheduleManageActions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.scheduleManageActions button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.scheduleEditor {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px dashed var(--color-brand);
+  border-radius: var(--radius-small);
   background: var(--color-brand-softer);
 }
 
@@ -2001,6 +2245,32 @@
   background: var(--color-danger) !important;
 }
 
+.mainPanel :where(p, li, label, input, select, textarea, button, em) {
+  font-weight: 500;
+}
+
+.mainPanel :where(span) {
+  font-weight: 600;
+}
+
+.mainPanel :where(strong, h3) {
+  font-weight: 700;
+}
+
+.mainPanel h2,
+.header h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+
+.mainPanel :where(button, .addInlineButton, .settingsAction, .editButton, h3, strong) {
+  font-family: var(--font-display);
+}
+
+.mainPanel :where(input, select, textarea, p, li, em) {
+  font-family: var(--font-body);
+}
+
 @media (max-width: 860px) {
   .header {
     grid-template-columns: 1fr;
@@ -2035,6 +2305,15 @@
 
   .taskRow {
     grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .reminderCard {
+    grid-template-columns: 1fr;
+  }
+
+  .reminderActions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .editButton {
@@ -2100,6 +2379,25 @@
   }
 
   .settingsAction {
+    width: 100%;
+  }
+
+  .settingsActionGroup {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .scheduleManageItem {
+    grid-template-columns: 1fr;
+  }
+
+  .scheduleManageActions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+
+  .scheduleManageActions button {
     width: 100%;
   }
 

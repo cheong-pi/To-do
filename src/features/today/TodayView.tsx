@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { sortTodayTasks } from "./todayRules";
 import styles from "./TodayView.module.css";
 import { isFirebaseConfigured, signInWithGoogle, signOutUser, subscribeAuthState } from "../../services/firebase";
 import { saveUserTasks, subscribeUserTasks } from "../../services/taskCloudStorage";
+import { loadStoredSchedules, saveStoredSchedules } from "../../services/scheduleStorage";
 import { loadStoredTasks, saveStoredTasks } from "../../services/taskStorage";
-import type { RepeatKind, Task, TaskKindOption, TaskOwner, TaskSource, TaskStatus, TodaySortGroup } from "../../types/task";
+import { saveUserAppData, subscribeUserAppData } from "../../services/userAppDataCloudStorage";
+import type { RepeatKind, Schedule, Task, TaskKindOption, TaskOwner, TaskSource, TaskStatus, TodaySortGroup } from "../../types/task";
 import type { User } from "firebase/auth";
 
 type AppTab = "plan" | "tasks" | "calendar" | "words" | "pomodoro" | "memo" | "settings";
@@ -12,6 +14,15 @@ type AppTab = "plan" | "tasks" | "calendar" | "words" | "pomodoro" | "memo" | "s
 type AppLanguage = "ko" | "en";
 
 type FontMode = "default" | "system";
+
+type ReminderPermission = NotificationPermission | "unsupported";
+
+const WordsTab = lazy(() => import("./WordsTab"));
+
+type AppSettings = {
+  language: AppLanguage;
+  fontMode: FontMode;
+};
 
 type Memo = {
   id: string;
@@ -26,16 +37,6 @@ type PlanBlock = {
   endTime: string;
   kind: "life" | "task";
   taskId: string | null;
-};
-
-type WordProgressRecord = {
-  en: string;
-  seenCount: number;
-  correctCount: number;
-  wrongCount: number;
-  lastSeenAt: string | null;
-  nextReviewAt: string;
-  lastResult: "studied" | "correct" | "wrong";
 };
 
 const tabLabels: Record<AppLanguage, Record<AppTab, string>> = {
@@ -69,11 +70,11 @@ const tabs: AppTab[] = [
   "settings"
 ];
 
-const kindOptions: Array<{ id: TaskKindOption; label: string; description: string }> = [
-  { id: "no_deadline", label: "기한 없음", description: "날짜 없이 보관" },
-  { id: "today", label: "오늘", description: "오늘 할 일" },
-  { id: "dday", label: "D-day", description: "마감일 계산" },
-  { id: "repeat", label: "반복설정", description: "기간/요일/매월" }
+const kindOptions: Array<{ id: TaskKindOption; label: Record<AppLanguage, string>; description: Record<AppLanguage, string> }> = [
+  { id: "no_deadline", label: { ko: "기한 없음", en: "No Deadline" }, description: { ko: "날짜 없이 보관", en: "Keep without a date" } },
+  { id: "today", label: { ko: "오늘", en: "Today" }, description: { ko: "오늘 할 일", en: "Add to today" } },
+  { id: "dday", label: { ko: "D-day", en: "D-day" }, description: { ko: "마감일 계산", en: "Track due date" } },
+  { id: "repeat", label: { ko: "반복설정", en: "Repeat" }, description: { ko: "기간/요일/매월", en: "Period, weekday, monthly" } }
 ];
 
 const fixedKindColors: Record<Exclude<TaskKindOption, "repeat">, string> = {
@@ -97,29 +98,6 @@ const repeatCalendarColors = [
   "#FFD6A5"
 ];
 
-const seedWords = [
-  { en: "diligent", pos: "adj.", ko: "성실한, 부지런한", ex: "She is a diligent student." },
-  { en: "consistent", pos: "adj.", ko: "일관된, 꾸준한", ex: "Consistent effort matters." },
-  { en: "momentum", pos: "n.", ko: "탄력, 가속도", ex: "The project gained momentum." },
-  { en: "resilient", pos: "adj.", ko: "회복력 있는", ex: "A resilient person tries again." },
-  { en: "deliberate", pos: "adj.", ko: "신중한, 의도적인", ex: "It was a deliberate choice." },
-  { en: "thrive", pos: "v.", ko: "번성하다, 잘 자라다", ex: "Plants thrive in sunlight." },
-  { en: "nurture", pos: "v.", ko: "기르다, 보살피다", ex: "Good habits nurture growth." },
-  { en: "perseverance", pos: "n.", ko: "끈기, 인내", ex: "Perseverance helps you continue." },
-  { en: "attempt", pos: "v.", ko: "시도하다", ex: "Try one small attempt." },
-  { en: "focus", pos: "v.", ko: "집중하다", ex: "Focus on one task." },
-  { en: "review", pos: "v.", ko: "복습하다, 검토하다", ex: "Review the words tomorrow." },
-  { en: "improve", pos: "v.", ko: "개선하다", ex: "Practice helps you improve." },
-  { en: "effort", pos: "n.", ko: "노력", ex: "Small effort counts." },
-  { en: "habit", pos: "n.", ko: "습관", ex: "A habit grows slowly." },
-  { en: "schedule", pos: "n.", ko: "일정", ex: "Check your schedule." },
-  { en: "reminder", pos: "n.", ko: "알림", ex: "Set a reminder." },
-  { en: "complete", pos: "v.", ko: "완료하다", ex: "Complete one task first." },
-  { en: "pause", pos: "v.", ko: "잠시 멈추다", ex: "Pause and breathe." },
-  { en: "repeat", pos: "v.", ko: "반복하다", ex: "Repeat the word aloud." },
-  { en: "steady", pos: "adj.", ko: "꾸준한, 안정된", ex: "Keep a steady pace." }
-];
-
 const learnedWordsStorageKey = "dont-forget-learned-words";
 const memoStorageKey = "dont-forget-memos";
 const planBlocksStorageKey = "dont-forget-plan-blocks";
@@ -129,7 +107,15 @@ export function TodayView() {
   const [activeTab, setActiveTab] = useState<AppTab>("plan");
   const [appLanguage, setAppLanguage] = useState<AppLanguage>(() => loadAppSettings().language);
   const [fontMode, setFontMode] = useState<FontMode>(() => loadAppSettings().fontMode);
-  const [tasks, setTasks] = useState<Task[]>(() => loadStoredTasks());
+  const [notificationPermission, setNotificationPermission] = useState<ReminderPermission>(() => getNotificationPermission());
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [dataResetToken, setDataResetToken] = useState(0);
+  const [hasOpenedWords, setHasOpenedWords] = useState(false);
+  const initialTasks = useMemo(() => loadStoredTasks(), []);
+  const [tasks, setTasks] = useState<Task[]>(() => initialTasks.filter((task) => !isSchedulerOwnedTask(task)));
+  const [schedules, setSchedules] = useState<Schedule[]>(() =>
+    mergeSchedules(loadStoredSchedules(), migrateScheduleTasks(initialTasks))
+  );
   const [selectedDate, setSelectedDate] = useState("2026-06-02");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [activeCreatePanel, setActiveCreatePanel] = useState<"task" | "schedule" | null>(null);
@@ -139,8 +125,20 @@ export function TodayView() {
   );
   const isApplyingRemoteTasks = useRef(false);
   const hasReceivedRemoteTasks = useRef(false);
+  const isApplyingRemoteSettings = useRef(false);
+  const hasReceivedRemoteSettings = useRef(false);
+  const isApplyingRemoteSchedules = useRef(false);
+  const hasReceivedRemoteSchedules = useRef(false);
+  const firedReminderKeys = useRef(new Set<string>());
 
-  const todayTasks = useMemo(() => sortTodayTasks(getTasksForDate(tasks, selectedDate)), [tasks, selectedDate]);
+  const todayTasks = useMemo(
+    () => sortTodayTasks([...getTasksForDate(tasks, selectedDate), ...getScheduleTasksForDate(schedules, selectedDate)]),
+    [tasks, schedules, selectedDate]
+  );
+  const activeReminderTasks = useMemo(
+    () => getDueReminderTasks(todayTasks, selectedDate, nowTick),
+    [todayTasks, selectedDate, nowTick]
+  );
   const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
   const fixedTaskTags = useMemo(() => getFixedTaskTags(tasks), [tasks]);
 
@@ -151,11 +149,22 @@ export function TodayView() {
   }, [appLanguage, fontMode]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "words") setHasOpenedWords(true);
+  }, [activeTab]);
+
+  useEffect(() => {
     if (!isFirebaseConfigured()) return;
 
     return subscribeAuthState((user) => {
       setAuthUser(user);
       hasReceivedRemoteTasks.current = false;
+      hasReceivedRemoteSettings.current = false;
+      hasReceivedRemoteSchedules.current = false;
       setAuthMessage(user ? `${user.displayName ?? "Google"} 동기화 중` : "Google 로그인 준비됨");
     });
   }, []);
@@ -163,10 +172,41 @@ export function TodayView() {
   useEffect(() => {
     if (!authUser) return;
 
+    const localSettings: AppSettings = { language: appLanguage, fontMode };
+
+    return subscribeUserAppData<AppSettings>(
+      authUser.uid,
+      "settings",
+      (remoteSettings) => {
+        if (!remoteSettings && !hasReceivedRemoteSettings.current) {
+          void saveUserAppData(authUser.uid, "settings", localSettings);
+          hasReceivedRemoteSettings.current = true;
+          return;
+        }
+
+        hasReceivedRemoteSettings.current = true;
+        if (!remoteSettings) return;
+
+        isApplyingRemoteSettings.current = true;
+        setAppLanguage(remoteSettings.language === "en" ? "en" : "ko");
+        setFontMode(remoteSettings.fontMode === "system" ? "system" : "default");
+      },
+      () => {
+        setAuthMessage("동기화 오류: 설정은 로컬에 저장 중");
+      }
+    );
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+
     return subscribeUserTasks(
       authUser.uid,
       (remoteTasks) => {
-        if (remoteTasks.length === 0 && !hasReceivedRemoteTasks.current && tasks.length > 0) {
+        const remoteAppTasks = remoteTasks.filter((task) => !isSchedulerOwnedTask(task));
+        const remoteSchedules = migrateScheduleTasks(remoteTasks);
+
+        if (remoteAppTasks.length === 0 && !hasReceivedRemoteTasks.current && tasks.length > 0) {
           void saveUserTasks(authUser.uid, tasks);
           hasReceivedRemoteTasks.current = true;
           setAuthMessage(`${authUser.displayName ?? "Google"} 동기화 완료`);
@@ -175,7 +215,10 @@ export function TodayView() {
 
         hasReceivedRemoteTasks.current = true;
         isApplyingRemoteTasks.current = true;
-        setTasks(remoteTasks);
+        setTasks(remoteAppTasks);
+        if (remoteSchedules.length > 0) {
+          setSchedules((current) => mergeSchedules(current, remoteSchedules));
+        }
         setAuthMessage(`${authUser.displayName ?? "Google"} 동기화 완료`);
       },
       () => {
@@ -183,6 +226,48 @@ export function TodayView() {
       }
     );
   }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+
+    return subscribeUserAppData<Schedule[]>(
+      authUser.uid,
+      "schedules",
+      (remoteSchedules) => {
+        if (!remoteSchedules && !hasReceivedRemoteSchedules.current && schedules.length > 0) {
+          void saveUserAppData(authUser.uid, "schedules", schedules);
+          hasReceivedRemoteSchedules.current = true;
+          return;
+        }
+
+        hasReceivedRemoteSchedules.current = true;
+        if (!remoteSchedules) return;
+
+        isApplyingRemoteSchedules.current = true;
+        setSchedules(remoteSchedules.filter(isSchedule));
+      },
+      () => {
+        setAuthMessage("동기화 오류: 일정을 로컬에 저장 중");
+      }
+    );
+  }, [authUser]);
+
+  useEffect(() => {
+    const saveTimer = window.setTimeout(() => {
+      if (isApplyingRemoteSettings.current) {
+        isApplyingRemoteSettings.current = false;
+        return;
+      }
+
+      if (authUser && hasReceivedRemoteSettings.current) {
+        void saveUserAppData(authUser.uid, "settings", { language: appLanguage, fontMode }).catch(() => {
+          setAuthMessage("동기화 오류: 설정은 로컬에 저장 중");
+        });
+      }
+    }, 400);
+
+    return () => window.clearTimeout(saveTimer);
+  }, [authUser, appLanguage, fontMode]);
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -196,17 +281,60 @@ export function TodayView() {
   }, [authUser, tasks]);
 
   useEffect(() => {
+    const saveTimer = window.setTimeout(() => {
+      if (!authUser || !hasReceivedRemoteSchedules.current || isApplyingRemoteSchedules.current) return;
+      void saveUserAppData(authUser.uid, "schedules", schedules).catch(() => {
+        setAuthMessage("동기화 오류: 일정을 로컬에 저장 중");
+      });
+    }, 400);
+
+    return () => window.clearTimeout(saveTimer);
+  }, [authUser, schedules]);
+
+  useEffect(() => {
     saveStoredTasks(tasks);
     if (isApplyingRemoteTasks.current) {
       isApplyingRemoteTasks.current = false;
     }
   }, [tasks]);
 
+  useEffect(() => {
+    saveStoredSchedules(schedules);
+    if (isApplyingRemoteSchedules.current) {
+      isApplyingRemoteSchedules.current = false;
+    }
+  }, [schedules]);
+
+  useEffect(() => {
+    if (notificationPermission !== "granted") return;
+
+    const timers = scheduleBrowserReminders(todayTasks, selectedDate, firedReminderKeys.current);
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [todayTasks, selectedDate, notificationPermission]);
+
   function updateTask(nextTask: Task) {
     setTasks((current) => current.map((task) => (task.id === nextTask.id ? nextTask : task)));
   }
 
   function toggleTaskDone(task: Task, date: string) {
+    if (task.owner === "schedule" && task.scheduleId) {
+      setSchedules((current) =>
+        current.map((schedule) =>
+          schedule.id === task.scheduleId
+            ? {
+                ...schedule,
+                status: schedule.status === "done" ? "planned" : "done",
+                updatedAt: new Date().toISOString()
+              }
+            : schedule
+        )
+      );
+      setEditingTaskId(null);
+      return;
+    }
+
     if (isRepeatTask(task)) {
       const completedDates = task.completedDates ?? [];
       const isDone = completedDates.includes(date);
@@ -238,6 +366,13 @@ export function TodayView() {
   }
 
   function saveTask(nextTask: Task) {
+    if (isSchedulerOwnedTask(nextTask)) {
+      setTasks((current) => current.filter((task) => task.id !== nextTask.id));
+      setSchedules((current) => mergeSchedules(current, migrateScheduleTasks([nextTask])));
+      setEditingTaskId(null);
+      return;
+    }
+
     updateTask(nextTask);
     setEditingTaskId(null);
   }
@@ -247,9 +382,78 @@ export function TodayView() {
     setEditingTaskId(null);
   }
 
+  function postponeReminder(task: Task) {
+    const nextReminderAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+    if (task.owner === "schedule" && task.scheduleId) {
+      setSchedules((current) =>
+        current.map((schedule) =>
+          schedule.id === task.scheduleId
+            ? {
+                ...schedule,
+                reminderAt: nextReminderAt,
+                updatedAt: new Date().toISOString()
+              }
+            : schedule
+        )
+      );
+      setNowTick(Date.now());
+      return;
+    }
+
+    updateTask({
+      ...task,
+      status: "postponed",
+      postponeCount: task.postponeCount + 1,
+      reminderAt: nextReminderAt
+    });
+    setNowTick(Date.now());
+  }
+
+  function cancelReminder(task: Task) {
+    if (task.owner === "schedule" && task.scheduleId) {
+      setSchedules((current) =>
+        current.map((schedule) =>
+          schedule.id === task.scheduleId
+            ? {
+                ...schedule,
+                status: "cancelled",
+                updatedAt: new Date().toISOString()
+              }
+            : schedule
+        )
+      );
+      return;
+    }
+
+    updateTask({
+      ...task,
+      status: "cancelled",
+      reminderAt: null
+    });
+  }
+
   function addTask(task: Task) {
+    if (isSchedulerOwnedTask(task)) {
+      setSchedules((current) => mergeSchedules(current, migrateScheduleTasks([task])));
+      setActiveCreatePanel(null);
+      return;
+    }
+
     setTasks((current) => [task, ...current]);
     setActiveCreatePanel(null);
+  }
+
+  function addSchedule(schedule: Schedule) {
+    setSchedules((current) => [schedule, ...current]);
+  }
+
+  function saveSchedule(nextSchedule: Schedule) {
+    setSchedules((current) => mergeSchedules(current.map((schedule) => (schedule.id === nextSchedule.id ? nextSchedule : schedule))));
+  }
+
+  function deleteSchedule(scheduleId: string) {
+    setSchedules((current) => current.filter((schedule) => schedule.id !== scheduleId));
   }
 
   async function handleGoogleLogin() {
@@ -272,21 +476,26 @@ export function TodayView() {
     }
   }
 
+  async function handleNotificationRequest() {
+    if (!("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      return;
+    }
+
+    const nextPermission = await Notification.requestPermission();
+    setNotificationPermission(nextPermission);
+  }
+
   return (
     <main className={styles.shell}>
       <header className={styles.header}>
         <div>
           <p className={styles.kicker}>{appLanguage === "ko" ? "습관 기르기" : "Habit guide"}</p>
           <h1>{appLanguage === "ko" ? "잊지 마" : "Don't Forget"}</h1>
-          <p className={styles.summary}>
-            {appLanguage === "ko"
-              ? "생활 루틴, 할일, 일정, 단어 외우기와 타이머를 한 흐름에서 관리합니다."
-              : "Manage routines, tasks, schedules, words, and focus sessions in one flow."}
-          </p>
         </div>
       </header>
 
-      <nav className={styles.tabs} aria-label="주요 화면">
+      <nav className={styles.tabs} aria-label={appLanguage === "ko" ? "주요 화면" : "Main screens"}>
         {tabs.map((tab) => (
           <button
             key={tab}
@@ -299,37 +508,74 @@ export function TodayView() {
         ))}
       </nav>
 
-      {activeTab === "plan" && <PlanTab tasks={todayTasks} selectedDate={selectedDate} />}
+      <PlanTab
+        tasks={todayTasks}
+        selectedDate={selectedDate}
+        language={appLanguage}
+        isActive={activeTab === "plan"}
+        cloudUserId={authUser?.uid ?? null}
+        onCloudMessage={setAuthMessage}
+      />
 
       {activeTab === "tasks" && (
         <TasksTab
           todayTasks={todayTasks}
           editingTask={editingTask}
           activeCreatePanel={activeCreatePanel}
+          activeReminderTasks={activeReminderTasks}
           fixedTaskTags={fixedTaskTags}
+          language={appLanguage}
           selectedDate={selectedDate}
           onDateChange={setSelectedDate}
           onToggleCreatePanel={(panel) => setActiveCreatePanel((current) => (current === panel ? null : panel))}
           onAddTask={addTask}
+          onAddSchedule={addSchedule}
+          schedules={schedules}
           onEdit={setEditingTaskId}
           onCloseEdit={() => setEditingTaskId(null)}
           onToggleDone={toggleTaskDone}
+          onPostponeReminder={postponeReminder}
+          onCancelReminder={cancelReminder}
           onSaveTask={saveTask}
           onDeleteTask={deleteTask}
+          onSaveSchedule={saveSchedule}
+          onDeleteSchedule={deleteSchedule}
         />
       )}
 
       {activeTab === "calendar" && (
         <CalendarTab
           tasks={tasks}
+          schedules={schedules}
           selectedDate={selectedDate}
+          language={appLanguage}
           onDateChange={setSelectedDate}
           onOpenTasks={() => setActiveTab("tasks")}
         />
       )}
-      <WordsTab isActive={activeTab === "words"} />
-      <PomodoroTab tasks={todayTasks} selectedDate={selectedDate} isActive={activeTab === "pomodoro"} />
-      {activeTab === "memo" && <MemoTab />}
+      {hasOpenedWords && (
+        <Suspense
+          fallback={
+            activeTab === "words" ? (
+              <section className={styles.mainPanel}>
+                <div className={styles.vocabDone}>
+                  <strong>{appLanguage === "ko" ? "단어장 불러오는 중" : "Loading Vocabulary"}</strong>
+                </div>
+              </section>
+            ) : null
+          }
+        >
+          <WordsTab
+            isActive={activeTab === "words"}
+            language={appLanguage}
+            dataResetToken={dataResetToken}
+            cloudUserId={authUser?.uid ?? null}
+            onCloudMessage={setAuthMessage}
+          />
+        </Suspense>
+      )}
+      <PomodoroTab tasks={todayTasks} selectedDate={selectedDate} isActive={activeTab === "pomodoro"} language={appLanguage} />
+      <MemoTab isActive={activeTab === "memo"} language={appLanguage} cloudUserId={authUser?.uid ?? null} onCloudMessage={setAuthMessage} />
       {activeTab === "settings" && (
         <SettingsTab
           language={appLanguage}
@@ -338,7 +584,16 @@ export function TodayView() {
           authMessage={authMessage}
           onLanguageChange={setAppLanguage}
           onFontModeChange={setFontMode}
-          onBackup={() => backupAppData(tasks)}
+          notificationPermission={notificationPermission}
+          onNotificationRequest={handleNotificationRequest}
+          onBackup={() => backupAppData(tasks, schedules)}
+          onDeleteData={() =>
+            void deleteAppData(authUser?.uid ?? null, () => {
+              setTasks([]);
+              setSchedules([]);
+              setDataResetToken((current) => current + 1);
+            })
+          }
           onGoogleLogin={handleGoogleLogin}
         />
       )}
@@ -350,16 +605,24 @@ type TasksTabProps = {
   todayTasks: Task[];
   editingTask: Task | null;
   activeCreatePanel: "task" | "schedule" | null;
+  activeReminderTasks: Task[];
   fixedTaskTags: string[];
+  language: AppLanguage;
+  schedules: Schedule[];
   selectedDate: string;
   onDateChange: (date: string) => void;
   onToggleCreatePanel: (panel: "task" | "schedule") => void;
   onAddTask: (task: Task) => void;
+  onAddSchedule: (schedule: Schedule) => void;
   onEdit: (taskId: string) => void;
   onCloseEdit: () => void;
   onToggleDone: (task: Task, date: string) => void;
+  onPostponeReminder: (task: Task) => void;
+  onCancelReminder: (task: Task) => void;
   onSaveTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
+  onSaveSchedule: (schedule: Schedule) => void;
+  onDeleteSchedule: (scheduleId: string) => void;
 };
 
 function SettingsTab({
@@ -369,7 +632,10 @@ function SettingsTab({
   authMessage,
   onLanguageChange,
   onFontModeChange,
+  notificationPermission,
+  onNotificationRequest,
   onBackup,
+  onDeleteData,
   onGoogleLogin
 }: {
   language: AppLanguage;
@@ -378,7 +644,10 @@ function SettingsTab({
   authMessage: string;
   onLanguageChange: (language: AppLanguage) => void;
   onFontModeChange: (fontMode: FontMode) => void;
+  notificationPermission: ReminderPermission;
+  onNotificationRequest: () => void;
   onBackup: () => void;
+  onDeleteData: () => void;
   onGoogleLogin: () => void;
 }) {
   return (
@@ -386,11 +655,6 @@ function SettingsTab({
       <div className={styles.sectionHeader}>
         <div>
           <h2>{language === "ko" ? "설정" : "Settings"}</h2>
-          <p>
-            {language === "ko"
-              ? "앱 표시 방식과 계정, 백업을 여기에서 관리합니다."
-              : "Manage app display, account, and backups here."}
-          </p>
         </div>
       </div>
 
@@ -430,15 +694,44 @@ function SettingsTab({
             <h3>{language === "ko" ? "데이터" : "Data"}</h3>
             <p>{language === "ko" ? "현재 로컬 데이터와 앱 설정을 JSON 파일로 저장합니다." : "Save current local data and settings as a JSON file."}</p>
           </div>
-          <button type="button" className={styles.settingsAction} onClick={onBackup}>
-            {language === "ko" ? "데이터 백업하기" : "Back Up Data"}
+          <div className={styles.settingsActionGroup}>
+            <button type="button" className={styles.settingsAction} onClick={onBackup}>
+              {language === "ko" ? "데이터 백업하기" : "Back Up Data"}
+            </button>
+            <button type="button" className={`${styles.settingsAction} ${styles.dangerAction}`} onClick={onDeleteData}>
+              {language === "ko" ? "데이터 삭제하기" : "Delete Data"}
+            </button>
+          </div>
+        </section>
+
+        <section className={styles.settingsGroup}>
+          <div>
+            <h3>{language === "ko" ? "알림" : "Notifications"}</h3>
+            <p>
+              {language === "ko"
+                ? getNotificationStatusLabel(notificationPermission)
+                : getNotificationStatusLabelEn(notificationPermission)}
+            </p>
+          </div>
+          <button
+            type="button"
+            className={styles.settingsAction}
+            onClick={onNotificationRequest}
+            disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}
+          >
+            {language === "ko" ? "브라우저 알림 켜기" : "Enable Browser Notifications"}
           </button>
         </section>
 
         <section className={styles.settingsGroup}>
           <div>
             <h3>{language === "ko" ? "계정" : "Account"}</h3>
-            <p>{authMessage}</p>
+            <p>{getAuthMessageLabel(authMessage, language)}</p>
+            <span className={styles.syncScope}>
+              {language === "ko"
+                ? "동기화 대상: 할일, 설정, 계획표, 단어 기록, 메모"
+                : "Syncs: tasks, schedules, settings, planner, word progress, memos"}
+            </span>
           </div>
           <button type="button" className={styles.settingsAction} onClick={onGoogleLogin}>
             {authUser ? (language === "ko" ? "Google 로그아웃" : "Sign Out") : language === "ko" ? "Google 로그인" : "Sign In With Google"}
@@ -450,17 +743,23 @@ function SettingsTab({
             <h3>{language === "ko" ? "도움말" : "Help"}</h3>
             {language === "ko" ? (
               <ul>
+                <li>잊지 마는 생활 루틴, 할일, 일정, 단어 외우기와 타이머를 한 흐름에서 관리하는 실행 관리 앱입니다.</li>
+                <li>설정: 앱 표시 방식, 계정, 백업, 데이터 삭제를 관리합니다.</li>
                 <li>계획표: 생활 루틴과 시간 있는 할일을 한 시간표에서 봅니다.</li>
-                <li>할일: 오늘 처리할 일과 일정 등록을 관리합니다.</li>
-                <li>달력: 날짜별 일정과 완료 흐름을 확인합니다.</li>
+                <li>할일: 오늘 처리할 일을 관리하고, 일정은 읽기용으로 함께 확인합니다.</li>
+                <li>일정 등록: 날짜 일정, 기간 일정, D-day를 별도 일정 데이터로 저장합니다.</li>
+                <li>달력: 반복은 실제 완료한 날만 색칠하고, 일반 일정은 날짜 칸에 텍스트로 표시합니다.</li>
                 <li>단어 외우기: 먼저 외우고, 퀴즈로 확인하며, 복습 단어가 다시 섞입니다.</li>
                 <li>타이머: 집중과 휴식을 그때그때 설정해서 사용합니다.</li>
               </ul>
             ) : (
               <ul>
+                <li>Don&apos;t Forget manages routines, tasks, schedules, vocabulary, and timers in one flow.</li>
+                <li>Settings: Manage display, account, backup, and data deletion.</li>
                 <li>Planner: View routines and timed tasks in one schedule.</li>
-                <li>Tasks: Manage today&apos;s tasks and schedule entries.</li>
-                <li>Calendar: Check dated events and completion flow.</li>
+                <li>Tasks: Manage today&apos;s tasks and review schedule entries as read-only items.</li>
+                <li>Schedule entry: Date events, period events, and D-days are stored separately from tasks.</li>
+                <li>Calendar: Repeating items are colored only on completed days, while ordinary events appear as text in date cells.</li>
                 <li>Vocabulary: Study first, quiz after, and review words return later.</li>
                 <li>Timer: Set focus and break sessions as needed.</li>
               </ul>
@@ -472,7 +771,21 @@ function SettingsTab({
   );
 }
 
-function PlanTab({ tasks, selectedDate }: { tasks: Task[]; selectedDate: string }) {
+function PlanTab({
+  tasks,
+  selectedDate,
+  language,
+  isActive,
+  cloudUserId,
+  onCloudMessage
+}: {
+  tasks: Task[];
+  selectedDate: string;
+  language: AppLanguage;
+  isActive: boolean;
+  cloudUserId: string | null;
+  onCloudMessage: (message: string) => void;
+}) {
   const [planBlocks, setPlanBlocks] = useState<PlanBlock[]>(() => loadStoredPlanBlocks());
   const [isAddingRoutine, setIsAddingRoutine] = useState(false);
   const [title, setTitle] = useState("");
@@ -503,9 +816,47 @@ function PlanTab({ tasks, selectedDate }: { tasks: Task[]; selectedDate: string 
       ].sort((a, b) => a.startTime.localeCompare(b.startTime)),
     [planBlocks, timedTasks]
   );
+  const isApplyingRemotePlanBlocks = useRef(false);
+  const hasReceivedRemotePlanBlocks = useRef(false);
+
+  useEffect(() => {
+    if (!cloudUserId) {
+      hasReceivedRemotePlanBlocks.current = false;
+      return;
+    }
+
+    return subscribeUserAppData<PlanBlock[]>(
+      cloudUserId,
+      "planBlocks",
+      (remotePlanBlocks) => {
+        if (!remotePlanBlocks && !hasReceivedRemotePlanBlocks.current && planBlocks.length > 0) {
+          void saveUserAppData(cloudUserId, "planBlocks", planBlocks);
+          hasReceivedRemotePlanBlocks.current = true;
+          return;
+        }
+
+        hasReceivedRemotePlanBlocks.current = true;
+        if (!remotePlanBlocks) return;
+
+        isApplyingRemotePlanBlocks.current = true;
+        setPlanBlocks(remotePlanBlocks.filter(isPlanBlock));
+      },
+      () => onCloudMessage("동기화 오류: 계획표는 로컬에 저장 중")
+    );
+  }, [cloudUserId]);
 
   useEffect(() => {
     saveStoredPlanBlocks(planBlocks);
+    if (isApplyingRemotePlanBlocks.current) {
+      isApplyingRemotePlanBlocks.current = false;
+      return;
+    }
+
+    if (cloudUserId && hasReceivedRemotePlanBlocks.current) {
+      void saveUserAppData(cloudUserId, "planBlocks", planBlocks).catch(() => {
+        onCloudMessage("동기화 오류: 계획표는 로컬에 저장 중");
+      });
+    }
   }, [planBlocks]);
 
   function addPlanBlock(event: FormEvent<HTMLFormElement>) {
@@ -533,19 +884,19 @@ function PlanTab({ tasks, selectedDate }: { tasks: Task[]; selectedDate: string 
   }
 
   return (
-    <section className={styles.mainPanel}>
+    <section className={styles.mainPanel} hidden={!isActive}>
       <div className={styles.sectionHeader}>
         <div>
-          <h2>{formatDateHeading(selectedDate)} 계획표</h2>
+          <h2>{formatDateHeading(selectedDate, language)} {language === "ko" ? "계획표" : "Planner"}</h2>
         </div>
         <div className={styles.headerActions}>
-          <span className={styles.headerMeta}>{timelineItems.length}개</span>
+          <span className={styles.headerMeta}>{language === "ko" ? `${timelineItems.length}개` : `${timelineItems.length} items`}</span>
           <button
             type="button"
             className={isAddingRoutine ? `${styles.addInlineButton} ${styles.activeInlineButton}` : styles.addInlineButton}
             onClick={() => setIsAddingRoutine((current) => !current)}
           >
-            {isAddingRoutine ? "추가 닫기" : "루틴 추가"}
+            {isAddingRoutine ? (language === "ko" ? "추가 닫기" : "Close") : language === "ko" ? "루틴 추가" : "Add Routine"}
           </button>
         </div>
       </div>
@@ -554,23 +905,23 @@ function PlanTab({ tasks, selectedDate }: { tasks: Task[]; selectedDate: string 
         <form className={styles.planComposer} onSubmit={addPlanBlock}>
           <div className={styles.formGrid}>
             <label className={styles.formRow}>
-              <span>시작</span>
+              <span>{language === "ko" ? "시작" : "Start"}</span>
               <input type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} />
             </label>
             <label className={styles.formRow}>
-              <span>종료</span>
+              <span>{language === "ko" ? "종료" : "End"}</span>
               <input type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} />
             </label>
           </div>
           <label className={styles.formRow}>
-            <span>루틴 제목</span>
+            <span>{language === "ko" ? "루틴 제목" : "Routine Title"}</span>
             <input
               value={title}
-              placeholder="예: 아침식사"
+              placeholder={language === "ko" ? "예: 아침식사" : "e.g. Breakfast"}
               onChange={(event) => setTitle(event.target.value)}
             />
           </label>
-          <button type="submit" className={styles.completeButton}>저장</button>
+          <button type="submit" className={styles.completeButton}>{language === "ko" ? "저장" : "Save"}</button>
         </form>
       )}
 
@@ -583,30 +934,30 @@ function PlanTab({ tasks, selectedDate }: { tasks: Task[]; selectedDate: string 
             <time>{item.endTime ? `${item.startTime} ~ ${item.endTime}` : item.startTime}</time>
             <div>
               <strong>{item.title}</strong>
-              <span>{item.kind === "task" ? "할일" : "생활 루틴"}</span>
+              <span>{item.kind === "task" ? (language === "ko" ? "할일" : "Task") : language === "ko" ? "생활 루틴" : "Life Routine"}</span>
             </div>
             {item.canDelete ? (
-              <button type="button" onClick={() => deletePlanBlock(item.id)}>삭제</button>
+              <button type="button" onClick={() => deletePlanBlock(item.id)}>{language === "ko" ? "삭제" : "Delete"}</button>
             ) : (
-              <span className={styles.planReadOnly}>자동</span>
+              <span className={styles.planReadOnly}>{language === "ko" ? "자동" : "Auto"}</span>
             )}
           </article>
         ))}
       </div>
 
       <section className={styles.untimedTaskPanel}>
-        <h3>시간 없는 할일</h3>
+        <h3>{language === "ko" ? "시간 없는 할일" : "Untimed Tasks"}</h3>
         {untimedTasks.length > 0 ? (
           <div className={styles.untimedTaskList}>
             {untimedTasks.map((task) => (
               <article key={task.id} className={styles.untimedTaskItem}>
                 <strong>{task.title}</strong>
-                <span>{task.source === "deadline" ? "D-day" : task.source === "routine" ? "반복" : "할일"}</span>
+                <span>{getTaskSourceLabel(task, language)}</span>
               </article>
             ))}
           </div>
         ) : (
-          <p className={styles.emptyState}>시간 없이 남아 있는 할일이 없습니다.</p>
+          <p className={styles.emptyState}>{language === "ko" ? "시간 없이 남아 있는 할일이 없습니다." : "No untimed tasks left."}</p>
         )}
       </section>
     </section>
@@ -617,28 +968,36 @@ function TasksTab({
   todayTasks,
   editingTask,
   activeCreatePanel,
+  activeReminderTasks,
   fixedTaskTags,
+  language,
+  schedules,
   selectedDate,
   onDateChange,
   onToggleCreatePanel,
   onAddTask,
+  onAddSchedule,
   onEdit,
   onCloseEdit,
   onToggleDone,
+  onPostponeReminder,
+  onCancelReminder,
   onSaveTask,
-  onDeleteTask
+  onDeleteTask,
+  onSaveSchedule,
+  onDeleteSchedule
 }: TasksTabProps) {
   return (
     <section className={styles.tabContent}>
-      <section className={styles.mainPanel} aria-label="오늘 할 일">
+      <section className={styles.mainPanel} aria-label={language === "ko" ? "오늘 할 일" : "Today Tasks"}>
         <div className={styles.sectionHeader}>
           <div>
-            <div className={styles.titleNav} aria-label="날짜 이동">
-              <button type="button" aria-label="이전 날짜" onClick={() => onDateChange(shiftDate(selectedDate, -1))}>
+            <div className={styles.titleNav} aria-label={language === "ko" ? "날짜 이동" : "Date navigation"}>
+              <button type="button" aria-label={language === "ko" ? "이전 날짜" : "Previous date"} onClick={() => onDateChange(shiftDate(selectedDate, -1))}>
                 &lt;
               </button>
-              <h2>{formatDateHeading(selectedDate)} 할일</h2>
-              <button type="button" aria-label="다음 날짜" onClick={() => onDateChange(shiftDate(selectedDate, 1))}>
+              <h2>{formatDateHeading(selectedDate, language)} {language === "ko" ? "할일" : "Tasks"}</h2>
+              <button type="button" aria-label={language === "ko" ? "다음 날짜" : "Next date"} onClick={() => onDateChange(shiftDate(selectedDate, 1))}>
                 &gt;
               </button>
               <span className={styles.titleCount}>{todayTasks.length}</span>
@@ -650,22 +1009,40 @@ function TasksTab({
               type="button"
               onClick={() => onToggleCreatePanel("task")}
             >
-              {activeCreatePanel === "task" ? "할일 닫기" : "할일 등록"}
+              {activeCreatePanel === "task" ? (language === "ko" ? "할일 닫기" : "Close Task") : language === "ko" ? "할일 등록" : "Add Task"}
             </button>
             <button
               className={activeCreatePanel === "schedule" ? `${styles.addInlineButton} ${styles.activeInlineButton}` : styles.addInlineButton}
               type="button"
               onClick={() => onToggleCreatePanel("schedule")}
             >
-              {activeCreatePanel === "schedule" ? "일정 닫기" : "일정 등록"}
+              {activeCreatePanel === "schedule" ? (language === "ko" ? "일정 닫기" : "Close Schedule") : language === "ko" ? "일정 등록" : "Add Schedule"}
             </button>
           </div>
         </div>
 
+        <ReminderTray
+          tasks={activeReminderTasks}
+          selectedDate={selectedDate}
+          language={language}
+          onToggleDone={onToggleDone}
+          onPostponeReminder={onPostponeReminder}
+          onCancelReminder={onCancelReminder}
+        />
+
         {activeCreatePanel === "task" && (
-          <TaskCreateForm selectedDate={selectedDate} fixedTaskTags={fixedTaskTags} onAddTask={onAddTask} />
+          <TaskCreateForm selectedDate={selectedDate} fixedTaskTags={fixedTaskTags} language={language} onAddTask={onAddTask} />
         )}
-        {activeCreatePanel === "schedule" && <ScheduleCreateForm selectedDate={selectedDate} onAddTask={onAddTask} />}
+        {activeCreatePanel === "schedule" && (
+          <SchedulePanel
+            selectedDate={selectedDate}
+            schedules={schedules}
+            language={language}
+            onAddSchedule={onAddSchedule}
+            onSaveSchedule={onSaveSchedule}
+            onDeleteSchedule={onDeleteSchedule}
+          />
+        )}
 
         <div className={styles.taskList}>
           {todayTasks.map((task) => (
@@ -673,6 +1050,7 @@ function TasksTab({
               <TaskRow
                 task={task}
                 selectedDate={selectedDate}
+                language={language}
                 onEdit={(taskId) => {
                   if (editingTask?.id === taskId) {
                     onCloseEdit();
@@ -687,6 +1065,7 @@ function TasksTab({
                 <TaskEditor
                   task={editingTask}
                   selectedDate={selectedDate}
+                  language={language}
                   onSaveTask={onSaveTask}
                   onDeleteTask={onDeleteTask}
                 />
@@ -695,20 +1074,20 @@ function TasksTab({
           ))}
         </div>
 
-        <RepeatProgressDots tasks={todayTasks} selectedDate={selectedDate} />
+        <RepeatProgressDots tasks={todayTasks} selectedDate={selectedDate} language={language} />
       </section>
     </section>
   );
 }
 
-function RepeatProgressDots({ tasks, selectedDate }: { tasks: Task[]; selectedDate: string }) {
+function RepeatProgressDots({ tasks, selectedDate, language }: { tasks: Task[]; selectedDate: string; language: AppLanguage }) {
   const repeatTasks = tasks.filter(isRepeatTask);
   if (repeatTasks.length === 0) return null;
 
   return (
-    <section className={styles.repeatProgress} aria-label="반복 진행 기록">
+    <section className={styles.repeatProgress} aria-label={language === "ko" ? "반복 진행 기록" : "Repeat progress"}>
       <div className={styles.repeatProgressHeader}>
-        <strong>반복 진행률</strong>
+        <strong>{language === "ko" ? "반복 진행률" : "Repeat Progress"}</strong>
       </div>
       <div className={styles.repeatProgressList}>
         {repeatTasks.map((task) => {
@@ -725,13 +1104,13 @@ function RepeatProgressDots({ tasks, selectedDate }: { tasks: Task[]; selectedDa
               <div className={styles.repeatProgressValue}>
                 <span>{doneCount}/{totalCount}</span>
               </div>
-              <div className={styles.repeatCheckGrid} aria-label={`${task.title} 반복 체크`}>
+              <div className={styles.repeatCheckGrid} aria-label={language === "ko" ? `${task.title} 반복 체크` : `${task.title} repeat checks`}>
                 {targetDates.map((day) => {
                   const isDone = isTaskDoneOnDate(task, day);
                   return (
                     <i
                       key={day}
-                      title={`${day} ${isDone ? "완료" : "미완료"}`}
+                      title={`${day} ${isDone ? (language === "ko" ? "완료" : "Done") : language === "ko" ? "미완료" : "Not done"}`}
                       className={isDone ? styles.repeatCheckDone : ""}
                       style={isDone ? { backgroundColor: task.calendarColor ?? repeatCalendarColors[0] } : undefined}
                     />
@@ -746,15 +1125,70 @@ function RepeatProgressDots({ tasks, selectedDate }: { tasks: Task[]; selectedDa
   );
 }
 
+function ReminderTray({
+  tasks,
+  selectedDate,
+  language,
+  onToggleDone,
+  onPostponeReminder,
+  onCancelReminder
+}: {
+  tasks: Task[];
+  selectedDate: string;
+  language: AppLanguage;
+  onToggleDone: (task: Task, date: string) => void;
+  onPostponeReminder: (task: Task) => void;
+  onCancelReminder: (task: Task) => void;
+}) {
+  if (tasks.length === 0) return null;
+
+  return (
+    <section className={styles.reminderTray} aria-label={language === "ko" ? "지금 확인할 알림" : "Active reminders"}>
+      <div className={styles.reminderTrayHeader}>
+        <strong>{language === "ko" ? "지금 확인할 알림" : "Active Reminders"}</strong>
+        <span>{language === "ko" ? `${tasks.length}개` : `${tasks.length}`}</span>
+      </div>
+      <div className={styles.reminderCards}>
+        {tasks.slice(0, 3).map((task) => (
+          <article key={task.id} className={styles.reminderCard}>
+            <div>
+              <span>{formatReminderLabel(task, language)}</span>
+              <strong>{task.title}</strong>
+            </div>
+            <div className={styles.reminderActions}>
+              <button type="button" onClick={() => onPostponeReminder(task)}>
+                {language === "ko" ? "10분 뒤" : "10 min"}
+              </button>
+              <button type="button" onClick={() => onToggleDone(task, selectedDate)}>
+                {language === "ko" ? "완료" : "Done"}
+              </button>
+              <button type="button" onClick={() => onCancelReminder(task)}>
+                {language === "ko" ? "취소" : "Cancel"}
+              </button>
+            </div>
+          </article>
+        ))}
+        {tasks.length > 3 && (
+          <p className={styles.reminderMore}>
+            {language === "ko" ? `+${tasks.length - 3}개 더 있습니다.` : `+${tasks.length - 3} more`}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function TaskRow({
   task,
   selectedDate,
+  language,
   onEdit,
   onToggleDone,
   isEditing
 }: {
   task: Task;
   selectedDate: string;
+  language: AppLanguage;
   onEdit: (taskId: string) => void;
   onToggleDone: (task: Task, date: string) => void;
   isEditing: boolean;
@@ -768,7 +1202,7 @@ function TaskRow({
       <button
         className={styles.taskCheck}
         type="button"
-        aria-label={isDone ? `${task.title} 완료 취소` : `${task.title} 완료`}
+        aria-label={isDone ? `${task.title} ${language === "ko" ? "완료 취소" : "mark incomplete"}` : `${task.title} ${language === "ko" ? "완료" : "mark done"}`}
         disabled={isCancelled}
         onClick={() => onToggleDone(task, selectedDate)}
       >
@@ -776,19 +1210,19 @@ function TaskRow({
       </button>
       <div className={styles.taskBody}>
         <div className={styles.taskTopline}>
-          {(task.reminderAt || task.time) && <span>{formatReminderLabel(task)}</span>}
-          {isSchedulerOwned && <span className={styles.scheduleTag}>일정</span>}
-          {isRepeatTask(task) && <span className={styles.repeatTag}>반복</span>}
+          {(task.reminderAt || task.time) && <span>{formatReminderLabel(task, language)}</span>}
+          {isSchedulerOwned && <span className={styles.scheduleTag}>{language === "ko" ? "일정" : "Schedule"}</span>}
+          {isRepeatTask(task) && <span className={styles.repeatTag}>{language === "ko" ? "반복" : "Repeat"}</span>}
           {task.dueDate && <span className={getDeadlineClass(selectedDate, task.dueDate)}>{formatDday(selectedDate, task.dueDate)}</span>}
-          {task.remainingPercent < 100 && <span>잔여 {task.remainingPercent}%</span>}
+          {task.remainingPercent < 100 && <span>{language === "ko" ? `잔여 ${task.remainingPercent}%` : `${task.remainingPercent}% left`}</span>}
         </div>
         <h3>{task.title}</h3>
       </div>
       {isSchedulerOwned ? (
-        <span className={styles.readonlyLabel}>스케쥴러</span>
+        <span className={styles.readonlyLabel}>{language === "ko" ? "스케줄러" : "Read-only"}</span>
       ) : (
         <button className={styles.editButton} type="button" onClick={() => onEdit(task.id)}>
-          {isEditing ? "닫기" : "수정"}
+          {isEditing ? (language === "ko" ? "닫기" : "Close") : language === "ko" ? "수정" : "Edit"}
         </button>
       )}
     </article>
@@ -798,11 +1232,12 @@ function TaskRow({
 type TaskEditorProps = {
   task: Task;
   selectedDate: string;
+  language: AppLanguage;
   onSaveTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
 };
 
-function TaskEditor({ task, selectedDate, onSaveTask, onDeleteTask }: TaskEditorProps) {
+function TaskEditor({ task, selectedDate, language, onSaveTask, onDeleteTask }: TaskEditorProps) {
   const initialKind = getTaskKindOption(task);
   const [title, setTitle] = useState(task.title);
   const [taskKind, setTaskKind] = useState<TaskKindOption>(initialKind);
@@ -876,22 +1311,23 @@ function TaskEditor({ task, selectedDate, onSaveTask, onDeleteTask }: TaskEditor
     <form className={styles.editorPanel} onSubmit={handleSubmit}>
       <div className={styles.editorHeader}>
         <div>
-          <p className={styles.kicker}>수정</p>
+          <p className={styles.kicker}>{language === "ko" ? "수정" : "Edit"}</p>
           <h2>{task.title}</h2>
         </div>
       </div>
 
       <label className={styles.formRow}>
-        <span>할일</span>
+        <span>{language === "ko" ? "할일" : "Task"}</span>
         <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} />
       </label>
 
       <label className={styles.checkboxRow}>
         <input type="checkbox" checked={isFixed} onChange={(event) => setIsFixed(event.target.checked)} />
-        고정 할일로 등록
+        {language === "ko" ? "고정 할일로 등록" : "Save as reusable task"}
       </label>
 
       <TaskKindFields
+        language={language}
         taskKind={taskKind}
         date={date}
         time={time}
@@ -915,29 +1351,29 @@ function TaskEditor({ task, selectedDate, onSaveTask, onDeleteTask }: TaskEditor
       />
 
       <label className={styles.formRow}>
-        <span>상태</span>
+        <span>{language === "ko" ? "상태" : "Status"}</span>
         <select value={status} onChange={(event) => setStatus(event.target.value as TaskStatus)}>
-          <option value="planned">계획</option>
-          <option value="started">진행 중</option>
-          <option value="done">완료</option>
-          <option value="postponed">연기</option>
-          <option value="cancelled">취소</option>
+          <option value="planned">{language === "ko" ? "계획" : "Planned"}</option>
+          <option value="started">{language === "ko" ? "진행 중" : "In Progress"}</option>
+          <option value="done">{language === "ko" ? "완료" : "Done"}</option>
+          <option value="postponed">{language === "ko" ? "연기" : "Postponed"}</option>
+          <option value="cancelled">{language === "ko" ? "취소" : "Cancelled"}</option>
         </select>
       </label>
 
       <label className={styles.formRow}>
-        <span>메모</span>
+        <span>{language === "ko" ? "메모" : "Memo"}</span>
         <textarea value={memo} onChange={(event) => setMemo(event.target.value)} maxLength={240} />
       </label>
 
       <div className={styles.progressBox}>
-        <span>진행률</span>
+        <span>{language === "ko" ? "진행률" : "Progress"}</span>
         <div className={styles.progressStepper}>
           <button type="button" onClick={() => changeProgress(progress - 10)}>
             -
           </button>
           <input
-            aria-label="진행률"
+            aria-label={language === "ko" ? "진행률" : "Progress"}
             type="number"
             min="0"
             max="100"
@@ -953,10 +1389,10 @@ function TaskEditor({ task, selectedDate, onSaveTask, onDeleteTask }: TaskEditor
 
       <div className={styles.editorFooter}>
         <button type="button" className={styles.deleteButton} onClick={() => onDeleteTask(task.id)}>
-          삭제
+          {language === "ko" ? "삭제" : "Delete"}
         </button>
         <button type="submit" className={styles.completeButton}>
-          저장
+          {language === "ko" ? "저장" : "Save"}
         </button>
       </div>
     </form>
@@ -966,10 +1402,12 @@ function TaskEditor({ task, selectedDate, onSaveTask, onDeleteTask }: TaskEditor
 function TaskCreateForm({
   selectedDate,
   fixedTaskTags,
+  language,
   onAddTask
 }: {
   selectedDate: string;
   fixedTaskTags: string[];
+  language: AppLanguage;
   onAddTask: (task: Task) => void;
 }) {
   const [title, setTitle] = useState("");
@@ -1057,12 +1495,12 @@ function TaskCreateForm({
   return (
     <form className={styles.createPanel} onSubmit={handleSubmit}>
       <label className={styles.formRow}>
-        <span>할일</span>
-        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="예: 운동하기" maxLength={80} />
+        <span>{language === "ko" ? "할일" : "Task"}</span>
+        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={language === "ko" ? "예: 운동하기" : "e.g. Exercise"} maxLength={80} />
       </label>
 
       {fixedTaskTags.length > 0 && (
-        <div className={styles.tagBox} aria-label="고정 할일 태그">
+        <div className={styles.tagBox} aria-label={language === "ko" ? "고정 할일 태그" : "Reusable task tags"}>
           {fixedTaskTags.map((tag) => (
             <button key={tag} type="button" onClick={() => setTitle(tag)}>
               {tag}
@@ -1073,10 +1511,11 @@ function TaskCreateForm({
 
       <label className={styles.checkboxRow}>
         <input type="checkbox" checked={isFixed} onChange={(event) => setIsFixed(event.target.checked)} />
-        고정 할일로 등록
+        {language === "ko" ? "고정 할일로 등록" : "Save as reusable task"}
       </label>
 
       <TaskKindFields
+        language={language}
         taskKind={taskKind}
         date={date}
         time={time}
@@ -1100,18 +1539,26 @@ function TaskCreateForm({
       />
 
       <label className={styles.formRow}>
-        <span>메모</span>
+        <span>{language === "ko" ? "메모" : "Memo"}</span>
         <textarea value={memo} onChange={(event) => setMemo(event.target.value)} maxLength={240} />
       </label>
 
       <button type="submit" className={styles.completeButton}>
-        등록
+        {language === "ko" ? "등록" : "Add"}
       </button>
     </form>
   );
 }
 
-function ScheduleCreateForm({ selectedDate, onAddTask }: { selectedDate: string; onAddTask: (task: Task) => void }) {
+function ScheduleCreateForm({
+  selectedDate,
+  language,
+  onAddSchedule
+}: {
+  selectedDate: string;
+  language: AppLanguage;
+  onAddSchedule: (schedule: Schedule) => void;
+}) {
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(selectedDate);
   const [endDate, setEndDate] = useState(selectedDate);
@@ -1128,7 +1575,7 @@ function ScheduleCreateForm({ selectedDate, onAddTask }: { selectedDate: string;
     const trimmedTitle = title.trim();
     if (!trimmedTitle) return;
 
-    onAddTask(createCalendarTask({ title: trimmedTitle, startDate: date, endDate, time, isDday }));
+    onAddSchedule(createCalendarSchedule({ title: trimmedTitle, startDate: date, endDate, time, isDday }));
     setTitle("");
     setTime("");
     setIsDday(false);
@@ -1137,35 +1584,181 @@ function ScheduleCreateForm({ selectedDate, onAddTask }: { selectedDate: string;
   return (
     <form className={styles.createPanel} onSubmit={handleSubmit}>
       <label className={styles.formRow}>
-        <span>{isDday ? "D-day 제목" : "일정 제목"}</span>
-        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="예: 병원 예약" maxLength={80} />
+        <span>{isDday ? "D-day Title" : language === "ko" ? "일정 제목" : "Schedule Title"}</span>
+        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={language === "ko" ? "예: 병원 예약" : "e.g. Doctor appointment"} maxLength={80} />
       </label>
       <div className={styles.formGrid}>
         <label className={styles.formRow}>
-          <span>{isDday ? "마감일" : "시작일"}</span>
+          <span>{isDday ? (language === "ko" ? "마감일" : "Due Date") : language === "ko" ? "시작일" : "Start Date"}</span>
           <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
         </label>
         <label className={styles.formRow}>
-          <span>종료일</span>
+          <span>{language === "ko" ? "종료일" : "End Date"}</span>
           <input type="date" value={endDate} disabled={isDday} onChange={(event) => setEndDate(event.target.value)} />
         </label>
         <label className={styles.formRow}>
-          <span>시간</span>
+          <span>{language === "ko" ? "시간" : "Time"}</span>
           <input type="time" value={time} onChange={(event) => setTime(event.target.value)} />
         </label>
       </div>
       <label className={styles.checkboxRow}>
         <input type="checkbox" checked={isDday} onChange={(event) => setIsDday(event.target.checked)} />
-        D-day로 표시
+        {language === "ko" ? "D-day로 표시" : "Mark as D-day"}
       </label>
       <button type="submit" className={styles.completeButton}>
-        일정 등록
+        {language === "ko" ? "일정 등록" : "Add Schedule"}
+      </button>
+    </form>
+  );
+}
+
+function SchedulePanel({
+  selectedDate,
+  schedules,
+  language,
+  onAddSchedule,
+  onSaveSchedule,
+  onDeleteSchedule
+}: {
+  selectedDate: string;
+  schedules: Schedule[];
+  language: AppLanguage;
+  onAddSchedule: (schedule: Schedule) => void;
+  onSaveSchedule: (schedule: Schedule) => void;
+  onDeleteSchedule: (scheduleId: string) => void;
+}) {
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
+  const selectedSchedules = useMemo(() => getSchedulesForDate(schedules, selectedDate, true), [schedules, selectedDate]);
+  const editingSchedule = selectedSchedules.find((schedule) => schedule.id === editingScheduleId) ?? null;
+
+  return (
+    <div className={styles.schedulePanel}>
+      <ScheduleCreateForm selectedDate={selectedDate} language={language} onAddSchedule={onAddSchedule} />
+
+      <section className={styles.scheduleManager}>
+        <div className={styles.scheduleManagerHeader}>
+          <strong>{formatDateHeading(selectedDate, language)} {language === "ko" ? "일정" : "Schedules"}</strong>
+          <span>{language === "ko" ? `${selectedSchedules.length}개` : selectedSchedules.length}</span>
+        </div>
+
+        {selectedSchedules.length > 0 ? (
+          <div className={styles.scheduleManageList}>
+            {selectedSchedules.map((schedule) => (
+              <article key={schedule.id} className={styles.scheduleManageItem}>
+                <div className={styles.scheduleManageInfo}>
+                  <span className={styles.scheduleTypeTag}>{getScheduleKindLabel(schedule, language)}</span>
+                  <strong>{schedule.title}</strong>
+                  <em>{formatScheduleRange(schedule, language)}</em>
+                </div>
+                <div className={styles.scheduleManageActions}>
+                  <button
+                    type="button"
+                    onClick={() => setEditingScheduleId((current) => (current === schedule.id ? null : schedule.id))}
+                  >
+                    {editingScheduleId === schedule.id ? (language === "ko" ? "닫기" : "Close") : language === "ko" ? "수정" : "Edit"}
+                  </button>
+                  <button type="button" className={styles.deleteButton} onClick={() => onDeleteSchedule(schedule.id)}>
+                    {language === "ko" ? "삭제" : "Delete"}
+                  </button>
+                </div>
+                {editingSchedule?.id === schedule.id && (
+                  <ScheduleEditor
+                    schedule={editingSchedule}
+                    language={language}
+                    onSaveSchedule={(nextSchedule) => {
+                      onSaveSchedule(nextSchedule);
+                      setEditingScheduleId(null);
+                    }}
+                  />
+                )}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className={styles.emptyState}>{language === "ko" ? "이 날짜에 등록된 일정이 없습니다." : "No schedules on this date."}</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ScheduleEditor({
+  schedule,
+  language,
+  onSaveSchedule
+}: {
+  schedule: Schedule;
+  language: AppLanguage;
+  onSaveSchedule: (schedule: Schedule) => void;
+}) {
+  const [title, setTitle] = useState(schedule.title);
+  const [startDate, setStartDate] = useState(schedule.startDate);
+  const [endDate, setEndDate] = useState(schedule.endDate);
+  const [time, setTime] = useState(schedule.time ?? "");
+  const [isDday, setIsDday] = useState(schedule.kind === "deadline");
+  const [status, setStatus] = useState(schedule.status);
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) return;
+
+    const normalizedEndDate = endDate >= startDate ? endDate : startDate;
+    onSaveSchedule({
+      ...schedule,
+      title: trimmedTitle,
+      startDate,
+      endDate: isDday ? startDate : normalizedEndDate,
+      time: time || null,
+      kind: isDday ? "deadline" : normalizedEndDate === startDate ? "date" : "period",
+      status,
+      reminderAt: schedule.reminderAt ?? null,
+      calendarColor: isDday ? fixedKindColors.dday : fixedKindColors.today,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  return (
+    <form className={styles.scheduleEditor} onSubmit={handleSubmit}>
+      <label className={styles.formRow}>
+        <span>{isDday ? "D-day Title" : language === "ko" ? "일정 제목" : "Schedule Title"}</span>
+        <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} />
+      </label>
+      <div className={styles.formGrid}>
+        <label className={styles.formRow}>
+          <span>{isDday ? (language === "ko" ? "마감일" : "Due Date") : language === "ko" ? "시작일" : "Start Date"}</span>
+          <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+        </label>
+        <label className={styles.formRow}>
+          <span>{language === "ko" ? "종료일" : "End Date"}</span>
+          <input type="date" value={endDate} disabled={isDday} onChange={(event) => setEndDate(event.target.value)} />
+        </label>
+        <label className={styles.formRow}>
+          <span>{language === "ko" ? "시간" : "Time"}</span>
+          <input type="time" value={time} onChange={(event) => setTime(event.target.value)} />
+        </label>
+        <label className={styles.formRow}>
+          <span>{language === "ko" ? "상태" : "Status"}</span>
+          <select value={status} onChange={(event) => setStatus(event.target.value as Schedule["status"])}>
+            <option value="planned">{language === "ko" ? "예정" : "Planned"}</option>
+            <option value="done">{language === "ko" ? "완료" : "Done"}</option>
+            <option value="cancelled">{language === "ko" ? "취소" : "Cancelled"}</option>
+          </select>
+        </label>
+      </div>
+      <label className={styles.checkboxRow}>
+        <input type="checkbox" checked={isDday} onChange={(event) => setIsDday(event.target.checked)} />
+        {language === "ko" ? "D-day로 표시" : "Mark as D-day"}
+      </label>
+      <button type="submit" className={styles.completeButton}>
+        {language === "ko" ? "일정 저장" : "Save Schedule"}
       </button>
     </form>
   );
 }
 
 type TaskKindFieldsProps = {
+  language: AppLanguage;
   taskKind: TaskKindOption;
   date: string;
   time: string;
@@ -1189,6 +1782,7 @@ type TaskKindFieldsProps = {
 };
 
 function TaskKindFields({
+  language,
   taskKind,
   date,
   time,
@@ -1212,7 +1806,7 @@ function TaskKindFields({
 }: TaskKindFieldsProps) {
   return (
     <section className={styles.kindBox}>
-      <div className={styles.kindGrid} role="radiogroup" aria-label="일정 종류">
+      <div className={styles.kindGrid} role="radiogroup" aria-label={language === "ko" ? "일정 종류" : "Task type"}>
         {kindOptions.map((option) => (
           <button
             key={option.id}
@@ -1222,22 +1816,22 @@ function TaskKindFields({
             className={taskKind === option.id ? `${styles.kindButton} ${styles.selectedKind}` : styles.kindButton}
             onClick={() => onTaskKindChange(option.id)}
           >
-            <strong>{option.label}</strong>
-            <span>{option.description}</span>
+            <strong>{option.label[language]}</strong>
+            <span>{option.description[language]}</span>
           </button>
         ))}
       </div>
 
-      {taskKind === "no_deadline" && <p className={styles.fieldHint}>날짜 없이 보관되는 할일입니다.</p>}
+      {taskKind === "no_deadline" && <p className={styles.fieldHint}>{language === "ko" ? "날짜 없이 보관되는 할일입니다." : "This task is stored without a date."}</p>}
 
       {taskKind === "today" && (
         <div className={styles.formGrid}>
           <label className={styles.formRow}>
-            <span>날짜</span>
+            <span>{language === "ko" ? "날짜" : "Date"}</span>
             <input type="date" value={date} onChange={(event) => onDateChange(event.target.value)} />
           </label>
           <label className={styles.formRow}>
-            <span>시간</span>
+            <span>{language === "ko" ? "시간" : "Time"}</span>
             <input type="time" value={time} onChange={(event) => onTimeChange(event.target.value)} />
           </label>
         </div>
@@ -1246,11 +1840,11 @@ function TaskKindFields({
       {taskKind === "dday" && (
         <div className={styles.formGrid}>
           <label className={styles.formRow}>
-            <span>마감일</span>
+            <span>{language === "ko" ? "마감일" : "Due Date"}</span>
             <input type="date" value={dueDate} onChange={(event) => onDueDateChange(event.target.value)} />
           </label>
           <label className={styles.formRow}>
-            <span>시작시간</span>
+            <span>{language === "ko" ? "시작시간" : "Start Time"}</span>
             <input type="time" value={time} onChange={(event) => onTimeChange(event.target.value)} />
           </label>
         </div>
@@ -1260,20 +1854,21 @@ function TaskKindFields({
         <>
           <div className={styles.formGrid}>
             <label className={styles.formRow}>
-              <span>진행 기간 시작</span>
+              <span>{language === "ko" ? "진행 기간 시작" : "Period Start"}</span>
               <input type="date" value={periodStartDate} onChange={(event) => onPeriodStartDateChange(event.target.value)} />
             </label>
             <label className={styles.formRow}>
-              <span>진행 기간 종료</span>
+              <span>{language === "ko" ? "진행 기간 종료" : "Period End"}</span>
               <input type="date" value={periodEndDate} onChange={(event) => onPeriodEndDateChange(event.target.value)} />
             </label>
             <label className={styles.formRow}>
-              <span>시작시간</span>
+              <span>{language === "ko" ? "시작시간" : "Start Time"}</span>
               <input type="time" value={time} onChange={(event) => onTimeChange(event.target.value)} />
             </label>
           </div>
 
           <RepeatFields
+            language={language}
             repeatKind={repeatKind}
             repeatDaysOfWeek={repeatDaysOfWeek}
             repeatDayOfMonth={repeatDayOfMonth}
@@ -1283,13 +1878,13 @@ function TaskKindFields({
           />
 
           <fieldset className={styles.colorField}>
-            <legend>달력 색상</legend>
+            <legend>{language === "ko" ? "달력 색상" : "Calendar Color"}</legend>
             <div className={styles.colorGrid}>
               {repeatCalendarColors.map((color) => (
                 <button
                   key={color}
                   type="button"
-                  aria-label={`반복 색상 ${color}`}
+                  aria-label={language === "ko" ? `반복 색상 ${color}` : `Repeat color ${color}`}
                   className={calendarColor === color ? `${styles.colorSwatch} ${styles.selectedColor}` : styles.colorSwatch}
                   style={{ backgroundColor: color }}
                   onClick={() => onCalendarColorChange(color)}
@@ -1304,6 +1899,7 @@ function TaskKindFields({
 }
 
 function RepeatFields({
+  language,
   repeatKind,
   repeatDaysOfWeek,
   repeatDayOfMonth,
@@ -1311,6 +1907,7 @@ function RepeatFields({
   onRepeatDaysChange,
   onRepeatDayOfMonthChange
 }: {
+  language: AppLanguage;
   repeatKind: RepeatKind;
   repeatDaysOfWeek: number[];
   repeatDayOfMonth: string;
@@ -1329,26 +1926,21 @@ function RepeatFields({
   return (
     <section className={styles.repeatBox}>
       <label className={styles.formRow}>
-        <span>반복</span>
+        <span>{language === "ko" ? "반복" : "Repeat"}</span>
         <select value={repeatKind} onChange={(event) => onRepeatKindChange(event.target.value as RepeatKind)}>
-          <option value="daily">매일</option>
-          <option value="weekly">요일 반복</option>
-          <option value="date_range">특정 기간</option>
-          <option value="monthly">매월</option>
+          <option value="daily">{language === "ko" ? "매일" : "Daily"}</option>
+          <option value="weekly">{language === "ko" ? "요일 반복" : "Weekly"}</option>
+          <option value="date_range">{language === "ko" ? "특정 기간" : "Date Range"}</option>
+          <option value="monthly">{language === "ko" ? "매월" : "Monthly"}</option>
         </select>
       </label>
 
       {repeatKind === "weekly" && (
-        <div className={styles.weekdayGrid} aria-label="반복 요일">
-          {[
-            ["일", 0],
-            ["월", 1],
-            ["화", 2],
-            ["수", 3],
-            ["목", 4],
-            ["금", 5],
-            ["토", 6]
-          ].map(([label, value]) => (
+        <div className={styles.weekdayGrid} aria-label={language === "ko" ? "반복 요일" : "Repeat weekdays"}>
+          {(language === "ko"
+            ? [["일", 0], ["월", 1], ["화", 2], ["수", 3], ["목", 4], ["금", 5], ["토", 6]]
+            : [["Sun", 0], ["Mon", 1], ["Tue", 2], ["Wed", 3], ["Thu", 4], ["Fri", 5], ["Sat", 6]]
+          ).map(([label, value]) => (
             <button
               key={value}
               type="button"
@@ -1363,7 +1955,7 @@ function RepeatFields({
 
       {repeatKind === "monthly" && (
         <label className={styles.formRow}>
-          <span>매월 반복일</span>
+          <span>{language === "ko" ? "매월 반복일" : "Monthly Day"}</span>
           <input
             type="number"
             min="1"
@@ -1387,6 +1979,148 @@ function getTasksForDate(tasks: Task[], date: string) {
   });
 }
 
+function getScheduleTasksForDate(schedules: Schedule[], date: string) {
+  return schedules
+    .filter((schedule) => schedule.status !== "cancelled")
+    .map((schedule) => scheduleToTask(schedule, date))
+    .filter((task): task is Task => Boolean(task));
+}
+
+function getSchedulesForDate(schedules: Schedule[], date: string, includeCancelled = false) {
+  return schedules
+    .filter((schedule) => includeCancelled || schedule.status !== "cancelled")
+    .filter((schedule) => {
+      if (schedule.kind === "deadline") {
+        const dday = daysBetween(date, schedule.startDate);
+        return dday >= 0 && dday <= 3;
+      }
+
+      return date >= schedule.startDate && date <= schedule.endDate;
+    })
+    .sort((a, b) => {
+      const timeDiff = (a.time ?? "99:99").localeCompare(b.time ?? "99:99");
+      if (timeDiff !== 0) return timeDiff;
+      return a.title.localeCompare(b.title, "ko-KR");
+    });
+}
+
+function scheduleToTask(schedule: Schedule, date: string): Task | null {
+  if (schedule.kind === "deadline") {
+    const dday = daysBetween(date, schedule.startDate);
+    if (dday < 0 || dday > 3) return null;
+  } else if (date < schedule.startDate || date > schedule.endDate) {
+    return null;
+  }
+
+  return {
+    id: `schedule-task-${schedule.id}`,
+    title: schedule.title,
+    date: schedule.kind === "deadline" || schedule.kind === "period" ? null : schedule.startDate,
+    dueDate: schedule.kind === "deadline" ? schedule.startDate : null,
+    periodStartDate: schedule.kind === "period" ? schedule.startDate : null,
+    periodEndDate: schedule.kind === "period" ? schedule.endDate : null,
+    time: schedule.time,
+    source: schedule.kind === "deadline" ? "deadline" : "manual",
+    status: schedule.status === "done" ? "done" : schedule.status === "cancelled" ? "cancelled" : "planned",
+    priority: "normal",
+    todaySortGroup: schedule.time ? "timed_today" : schedule.kind === "deadline" ? "near_deadline" : "pulled_to_today",
+    taskKindOption: schedule.kind === "deadline" ? "dday" : "today",
+    owner: "schedule",
+    postponeCount: 0,
+    progressPercent: schedule.status === "done" ? 100 : 0,
+    remainingPercent: schedule.status === "done" ? 0 : 100,
+    reminderAt: schedule.reminderAt ?? null,
+    parentTaskId: null,
+    scheduleId: schedule.id,
+    calendarColor: schedule.calendarColor,
+    repeatKind: "none",
+    repeatDaysOfWeek: [],
+    repeatDayOfMonth: null,
+    completedDates: [],
+    isGenerated: false,
+    isManuallyEdited: false,
+    memo: schedule.memo ?? ""
+  };
+}
+
+function migrateScheduleTasks(tasks: Task[]) {
+  return tasks.filter(isSchedulerOwnedTask).map(taskToSchedule);
+}
+
+function taskToSchedule(task: Task): Schedule {
+  const startDate = task.dueDate ?? task.periodStartDate ?? task.date ?? getLocalDateKey();
+  const endDate = task.periodEndDate ?? startDate;
+  const now = new Date().toISOString();
+
+  return {
+    id: task.scheduleId ?? task.id.replace(/^task-/, "schedule-"),
+    title: task.title,
+    startDate,
+    endDate,
+    time: task.time,
+    kind: task.dueDate ? "deadline" : task.periodStartDate && task.periodEndDate && task.periodEndDate !== task.periodStartDate ? "period" : "date",
+    status: task.status === "done" ? "done" : task.status === "cancelled" ? "cancelled" : "planned",
+    reminderAt: task.reminderAt,
+    calendarColor: task.calendarColor ?? (task.dueDate ? fixedKindColors.dday : fixedKindColors.today),
+    linkedTaskId: task.id,
+    createdAt: now,
+    updatedAt: now,
+    memo: task.memo
+  };
+}
+
+function mergeSchedules(...groups: Schedule[][]) {
+  const scheduleMap = new Map<string, Schedule>();
+  groups.flat().filter(isSchedule).forEach((schedule) => {
+    scheduleMap.set(schedule.id, schedule);
+  });
+  return Array.from(scheduleMap.values()).sort((a, b) => {
+    const dateDiff = a.startDate.localeCompare(b.startDate);
+    if (dateDiff !== 0) return dateDiff;
+    return (a.time ?? "99:99").localeCompare(b.time ?? "99:99");
+  });
+}
+
+function isSchedule(value: unknown): value is Schedule {
+  if (!value || typeof value !== "object") return false;
+  const schedule = value as Partial<Schedule>;
+  return (
+    typeof schedule.id === "string" &&
+    typeof schedule.title === "string" &&
+    typeof schedule.startDate === "string" &&
+    typeof schedule.endDate === "string" &&
+    (schedule.kind === "date" || schedule.kind === "deadline" || schedule.kind === "period")
+  );
+}
+
+function getScheduleKindLabel(schedule: Schedule, language: AppLanguage = "ko") {
+  if (schedule.kind === "deadline") return "D-day";
+  if (schedule.kind === "period") return language === "ko" ? "기간" : "Period";
+  return language === "ko" ? "일정" : "Event";
+}
+
+function formatScheduleRange(schedule: Schedule, language: AppLanguage = "ko") {
+  const dateLabel = schedule.kind === "deadline" ? formatDday(getLocalDateKey(), schedule.startDate) : schedule.startDate === schedule.endDate ? schedule.startDate : `${schedule.startDate} ~ ${schedule.endDate}`;
+  const timeLabel = schedule.time ? ` · ${schedule.time}` : "";
+  const statusLabel =
+    schedule.status === "done"
+      ? language === "ko"
+        ? " · 완료"
+        : " · Done"
+      : schedule.status === "cancelled"
+        ? language === "ko"
+          ? " · 취소"
+          : " · Cancelled"
+        : "";
+  return `${dateLabel}${timeLabel}${statusLabel}`;
+}
+
+function getTaskSourceLabel(task: Task, language: AppLanguage) {
+  if (task.source === "deadline") return "D-day";
+  if (task.source === "routine") return language === "ko" ? "반복" : "Repeat";
+  return language === "ko" ? "할일" : "Task";
+}
+
 function getFixedTaskTags(tasks: Task[]) {
   return Array.from(
     new Set(
@@ -1402,15 +2136,12 @@ function getRepeatTrackers(tasks: Task[]) {
   return tasks.filter(isRepeatTask);
 }
 
-function getCalendarTextTasks(tasks: Task[], date: string) {
-  return tasks
-    .filter((task) => {
-      if (isRepeatTask(task) || task.source === "no_date") return false;
-      return (
-        task.date === date ||
-        task.dueDate === date ||
-        Boolean(task.periodStartDate && task.periodEndDate && date >= task.periodStartDate && date <= task.periodEndDate)
-      );
+function getCalendarTextSchedules(schedules: Schedule[], date: string) {
+  return schedules
+    .filter((schedule) => {
+      if (schedule.status === "cancelled") return false;
+      if (schedule.kind === "deadline") return schedule.startDate === date;
+      return date >= schedule.startDate && date <= schedule.endDate;
     })
     .sort((a, b) => {
       const timeDiff = (a.time ?? "99:99").localeCompare(b.time ?? "99:99");
@@ -1419,11 +2150,11 @@ function getCalendarTextTasks(tasks: Task[], date: string) {
     });
 }
 
-function getCalendarProgressTasks(tasks: Task[], date: string) {
-  return getTasksForDate(tasks, date).filter((task) => task.source !== "no_date");
+function getCalendarProgressTasks(tasks: Task[], schedules: Schedule[], date: string) {
+  return [...getTasksForDate(tasks, date), ...getScheduleTasksForDate(schedules, date)].filter((task) => task.source !== "no_date");
 }
 
-function createCalendarTask({
+function createCalendarSchedule({
   title,
   startDate,
   endDate,
@@ -1435,36 +2166,24 @@ function createCalendarTask({
   endDate: string;
   time: string;
   isDday: boolean;
-}): Task {
+}): Schedule {
   const normalizedEndDate = endDate >= startDate ? endDate : startDate;
   const isPeriod = !isDday && normalizedEndDate !== startDate;
+  const now = new Date().toISOString();
 
   return {
-    id: `task-${Date.now()}`,
+    id: `schedule-${Date.now()}`,
     title,
-    date: isDday || isPeriod ? null : startDate,
-    dueDate: isDday ? startDate : null,
-    periodStartDate: isPeriod ? startDate : null,
-    periodEndDate: isPeriod ? normalizedEndDate : null,
+    startDate,
+    endDate: isDday ? startDate : normalizedEndDate,
     time: time || null,
-    source: isDday ? "deadline" : "manual",
+    kind: isDday ? "deadline" : isPeriod ? "period" : "date",
     status: "planned",
-    priority: "normal",
-    todaySortGroup: time ? "timed_today" : isDday ? "near_deadline" : "pulled_to_today",
-    taskKindOption: isDday ? "dday" : "today",
-    postponeCount: 0,
-    progressPercent: 0,
-    remainingPercent: 100,
     reminderAt: null,
-    parentTaskId: null,
     calendarColor: isDday ? fixedKindColors.dday : fixedKindColors.today,
-    owner: "schedule",
-    repeatKind: "none",
-    repeatDaysOfWeek: [],
-    repeatDayOfMonth: null,
-    completedDates: [],
-    isGenerated: false,
-    isManuallyEdited: false,
+    linkedTaskId: null,
+    createdAt: now,
+    updatedAt: now,
     memo: ""
   };
 }
@@ -1615,21 +2334,21 @@ function matchesRepeat(task: Task, date: string) {
   return false;
 }
 
-function formatDateTitle(date: string) {
+function formatDateTitle(date: string, language: AppLanguage = "ko") {
   const today = "2026-06-02";
-  if (date === today) return "오늘";
-  if (date === shiftDate(today, -1)) return "어제";
-  if (date === shiftDate(today, 1)) return "내일";
+  if (date === today) return language === "ko" ? "오늘" : "Today";
+  if (date === shiftDate(today, -1)) return language === "ko" ? "어제" : "Yesterday";
+  if (date === shiftDate(today, 1)) return language === "ko" ? "내일" : "Tomorrow";
 
-  return new Date(`${date}T00:00:00`).toLocaleDateString("ko-KR", {
+  return new Date(`${date}T00:00:00`).toLocaleDateString(language === "ko" ? "ko-KR" : "en-US", {
     month: "long",
     day: "numeric",
     weekday: "short"
   });
 }
 
-function formatDateHeading(date: string) {
-  return new Date(`${date}T00:00:00`).toLocaleDateString("ko-KR", {
+function formatDateHeading(date: string, language: AppLanguage = "ko") {
+  return new Date(`${date}T00:00:00`).toLocaleDateString(language === "ko" ? "ko-KR" : "en-US", {
     month: "long",
     day: "numeric",
     weekday: "short"
@@ -1735,25 +2454,127 @@ function formatReminderTime(reminderAt: string) {
   });
 }
 
-function formatReminderLabel(task: Task) {
-  if (task.reminderAt) return `${formatReminderTime(task.reminderAt)} 알림`;
-  if (task.time) return `${task.time} 알림`;
+function formatReminderLabel(task: Task, language: AppLanguage = "ko") {
+  const suffix = language === "ko" ? "알림" : "reminder";
+  if (task.reminderAt) return `${formatReminderTime(task.reminderAt)} ${suffix}`;
+  if (task.time) return `${task.time} ${suffix}`;
   return "";
+}
+
+function getNotificationPermission(): ReminderPermission {
+  if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
+  return Notification.permission;
+}
+
+function getNotificationStatusLabel(permission: ReminderPermission) {
+  if (permission === "unsupported") return "이 브라우저에서는 알림을 사용할 수 없습니다.";
+  if (permission === "granted") return "시간이 있는 할일과 일정은 앱이 열려 있거나 PWA로 실행 중일 때 알림을 보냅니다.";
+  if (permission === "denied") return "브라우저에서 알림이 차단되어 있습니다. 브라우저 설정에서 권한을 바꿔야 합니다.";
+  return "시간이 있는 할일과 일정 알림을 받으려면 브라우저 알림 권한을 켜야 합니다.";
+}
+
+function getNotificationStatusLabelEn(permission: ReminderPermission) {
+  if (permission === "unsupported") return "This browser does not support notifications.";
+  if (permission === "granted") return "Timed tasks and schedules notify while the app is open or running as a PWA.";
+  if (permission === "denied") return "Notifications are blocked. Change permission in your browser settings.";
+  return "Enable browser notifications to receive timed task and schedule reminders.";
+}
+
+function getAuthMessageLabel(message: string, language: AppLanguage) {
+  if (language === "ko") return message;
+  if (message === "Firebase 설정 필요") return "Firebase setup required.";
+  if (message === "Google 로그인 준비됨") return "Google sign-in ready.";
+  if (message.includes("Firebase 설정값")) return "Add Firebase values to .env to sign in.";
+  if (message.includes("동기화 오류")) return "Sync error: saving locally.";
+  if (message.endsWith("동기화 중")) return `${message.replace(" 동기화 중", "")} syncing`;
+  return message;
+}
+
+function scheduleBrowserReminders(tasks: Task[], selectedDate: string, firedKeys: Set<string>) {
+  const now = Date.now();
+  const maxDelay = 1000 * 60 * 60 * 24;
+
+  return tasks.flatMap((task) => {
+    if (task.status === "done" || task.status === "cancelled") return [];
+
+    const remindAt = getTaskReminderDate(task, selectedDate);
+    if (!remindAt) return [];
+
+    const delay = remindAt.getTime() - now;
+    if (delay <= 0 || delay > maxDelay) return [];
+
+    const reminderKey = `${task.id}-${remindAt.toISOString()}`;
+    if (firedKeys.has(reminderKey)) return [];
+
+    const timer = window.setTimeout(() => {
+      firedKeys.add(reminderKey);
+      showTaskNotification(task);
+    }, delay);
+
+    return [timer];
+  });
+}
+
+function getDueReminderTasks(tasks: Task[], selectedDate: string, now: number) {
+  if (selectedDate > getLocalDateKey()) return [];
+
+  return tasks
+    .filter((task) => task.status !== "done" && task.status !== "cancelled")
+    .filter((task) => {
+      const remindAt = getTaskReminderDate(task, selectedDate);
+      return remindAt ? remindAt.getTime() <= now : false;
+    })
+    .sort((a, b) => {
+      const aTime = getTaskReminderDate(a, selectedDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const bTime = getTaskReminderDate(b, selectedDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      return aTime - bTime;
+    });
+}
+
+function getTaskReminderDate(task: Task, selectedDate: string) {
+  if (task.reminderAt) {
+    const reminderDate = new Date(task.reminderAt);
+    return Number.isNaN(reminderDate.getTime()) ? null : reminderDate;
+  }
+
+  if (!task.time) return null;
+
+  const reminderDate = new Date(`${selectedDate}T${task.time}:00`);
+  return Number.isNaN(reminderDate.getTime()) ? null : reminderDate;
+}
+
+function showTaskNotification(task: Task) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+
+  const notification = new Notification(task.title, {
+    body: "딱 5분만 시작해요.",
+    icon: "./icon.svg",
+    tag: `dont-forget-${task.id}`
+  });
+
+  notification.onclick = () => {
+    window.focus();
+    notification.close();
+  };
 }
 
 function CalendarTab({
   tasks,
+  schedules,
   selectedDate,
+  language,
   onDateChange,
   onOpenTasks
 }: {
   tasks: Task[];
+  schedules: Schedule[];
   selectedDate: string;
+  language: AppLanguage;
   onDateChange: (date: string) => void;
   onOpenTasks: () => void;
 }) {
   const monthDays = getMonthDays(selectedDate);
-  const monthTitle = new Date(`${selectedDate}T00:00:00`).toLocaleDateString("ko-KR", {
+  const monthTitle = new Date(`${selectedDate}T00:00:00`).toLocaleDateString(language === "ko" ? "ko-KR" : "en-US", {
     year: "numeric",
     month: "long"
   });
@@ -1766,29 +2587,27 @@ function CalendarTab({
   return (
     <section className={styles.mainPanel}>
       <div className={styles.sectionHeader}>
-        <div className={styles.titleNav} aria-label="월 이동">
-          <button type="button" aria-label="이전 달" onClick={() => onDateChange(shiftMonth(selectedDate, -1))}>
+        <div className={styles.titleNav} aria-label={language === "ko" ? "월 이동" : "Month navigation"}>
+          <button type="button" aria-label={language === "ko" ? "이전 달" : "Previous month"} onClick={() => onDateChange(shiftMonth(selectedDate, -1))}>
             &lt;
           </button>
           <h2>{monthTitle}</h2>
-          <button type="button" aria-label="다음 달" onClick={() => onDateChange(shiftMonth(selectedDate, 1))}>
+          <button type="button" aria-label={language === "ko" ? "다음 달" : "Next month"} onClick={() => onDateChange(shiftMonth(selectedDate, 1))}>
             &gt;
           </button>
         </div>
       </div>
-      <p className={styles.placeholderText}>반복은 실제 완료한 날만 색칠하고, 일반 일정은 날짜 칸에 텍스트로 표시합니다.</p>
-
-      <div className={styles.calendarGrid} aria-label={`${monthTitle} 달력`}>
-        {["일", "월", "화", "수", "목", "금", "토"].map((label) => (
-          <div key={label} className={label === "일" ? `${styles.calendarDow} ${styles.sunday}` : styles.calendarDow}>
+      <div className={styles.calendarGrid} aria-label={`${monthTitle} ${language === "ko" ? "달력" : "calendar"}`}>
+        {(language === "ko" ? ["일", "월", "화", "수", "목", "금", "토"] : ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]).map((label, index) => (
+          <div key={label} className={index === 0 ? `${styles.calendarDow} ${styles.sunday}` : styles.calendarDow}>
             {label}
           </div>
         ))}
         {monthDays.map((day, index) => {
           if (!day) return <div key={`blank-${index}`} className={`${styles.calendarCell} ${styles.blankCell}`} />;
 
-          const dayTasks = getCalendarTextTasks(tasks, day);
-          const progressTasks = getCalendarProgressTasks(tasks, day);
+          const daySchedules = getCalendarTextSchedules(schedules, day);
+          const progressTasks = getCalendarProgressTasks(tasks, schedules, day);
           const progressDoneCount = progressTasks.filter((task) => isTaskDoneOnDate(task, day)).length;
           const progressRate = progressTasks.length === 0 ? 0 : Math.round((progressDoneCount / progressTasks.length) * 100);
           const isDayComplete = progressTasks.length > 0 && progressDoneCount === progressTasks.length;
@@ -1810,22 +2629,22 @@ function CalendarTab({
                 {date.getDate()}
               </span>
               {progressTasks.length > 0 && (
-                <span className={styles.calendarStats} aria-label={`일정 ${progressTasks.length}개, 진척률 ${progressRate}%`}>
+                <span className={styles.calendarStats} aria-label={language === "ko" ? `일정 ${progressTasks.length}개, 진척률 ${progressRate}%` : `${progressTasks.length} items, ${progressRate}% done`}>
                   {progressTasks.length} · {progressRate}%
                 </span>
               )}
               <span className={styles.calendarTextList}>
-                {dayTasks.slice(0, 3).map((task) => (
-                  <span key={task.id} className={task.dueDate === day ? styles.calendarDeadlineText : ""}>
-                    {task.time ? `${task.time} ` : ""}
-                    {task.dueDate === day ? `${formatDday(day, task.dueDate)} ` : ""}
-                    {task.title}
+                {daySchedules.slice(0, 3).map((schedule) => (
+                  <span key={schedule.id} className={schedule.kind === "deadline" ? styles.calendarDeadlineText : ""}>
+                    {schedule.time ? `${schedule.time} ` : ""}
+                    {schedule.kind === "deadline" ? `${formatDday(day, schedule.startDate)} ` : ""}
+                    {schedule.title}
                   </span>
                 ))}
-                {dayTasks.length > 3 && <span>+{dayTasks.length - 3}</span>}
+                {daySchedules.length > 3 && <span>+{daySchedules.length - 3}</span>}
               </span>
               {progressTasks.length > 0 && (
-                <span className={styles.calendarBar} aria-label={`진척률 ${progressDoneCount}/${progressTasks.length}`}>
+                <span className={styles.calendarBar} aria-label={language === "ko" ? `진척률 ${progressDoneCount}/${progressTasks.length}` : `Progress ${progressDoneCount}/${progressTasks.length}`}>
                   <i style={{ width: `${progressRate}%` }} />
                 </span>
               )}
@@ -1837,308 +2656,18 @@ function CalendarTab({
   );
 }
 
-function WordsTab({ isActive }: { isActive: boolean }) {
-  const [wordProgress, setWordProgress] = useState<WordProgressRecord[]>(() => loadWordProgress());
-  const [dailyWordCount, setDailyWordCount] = useState(20);
-  const [deck, setDeck] = useState(() => buildWordDeck(20, loadWordProgress()));
-  const [wordPhase, setWordPhase] = useState<"study" | "quiz">("study");
-  const [wordIndex, setWordIndex] = useState(0);
-  const [isFlipped, setIsFlipped] = useState(false);
-  const [quizType, setQuizType] = useState<"meaning" | "spelling">("meaning");
-  const [selectedMeaning, setSelectedMeaning] = useState("");
-  const [typedAnswer, setTypedAnswer] = useState("");
-  const [checkedMeaning, setCheckedMeaning] = useState<"correct" | "wrong" | null>(null);
-  const [knownWords, setKnownWords] = useState<string[]>([]);
-  const [reviewWords, setReviewWords] = useState<string[]>([]);
-  const [studiedResults, setStudiedResults] = useState<Array<{ en: string; result: "studied" | "correct" | "wrong" }>>([]);
-  const [showLearnedWords, setShowLearnedWords] = useState(false);
-  const currentWord = deck[wordIndex];
-  const isFinished = wordPhase === "quiz" && wordIndex >= deck.length;
-  const progressRate = deck.length === 0 ? 0 : Math.round((wordIndex / deck.length) * 100);
-  const learnedWordCount = wordProgress.filter((record) => record.seenCount > 0).length;
-  const progressedWordItems = studiedResults
-    .map((result) => {
-      const word = seedWords.find((item) => item.en === result.en);
-      return word ? { ...word, result: result.result } : null;
-    })
-    .filter((word): word is (typeof seedWords)[number] & { result: "studied" | "correct" | "wrong" } => Boolean(word));
-  const meaningOptions = useMemo(() => {
-    if (!currentWord) return [];
-    const otherMeanings = shuffleWords(seedWords.filter((word) => word.en !== currentWord.en))
-      .slice(0, 3)
-      .map((word) => word.ko);
-    return shuffleWords([currentWord.ko, ...otherMeanings]);
-  }, [currentWord]);
 
-  useEffect(() => {
-    saveWordProgress(wordProgress);
-  }, [wordProgress]);
-
-  function extendDeck(currentDeck: typeof seedWords, count: number) {
-    const currentWords = new Set(currentDeck.map((word) => word.en));
-    const extraWords = buildWordDeck(count + currentDeck.length, wordProgress, currentWords).slice(0, count);
-    return [...currentDeck, ...extraWords];
-  }
-
-  function resizeDailyDeck(count: number) {
-    const safeCount = clampTimerValue(count, 1, seedWords.length);
-    setDailyWordCount(safeCount);
-    setDeck((currentDeck) => {
-      const protectedCount = Math.min(currentDeck.length, getProtectedWordCount(wordPhase, wordIndex));
-      if (safeCount <= protectedCount) return currentDeck.slice(0, protectedCount);
-      if (safeCount <= currentDeck.length) return currentDeck.slice(0, safeCount);
-
-      return extendDeck(currentDeck, safeCount - currentDeck.length);
-    });
-  }
-
-  function restart(count = dailyWordCount) {
-    const safeCount = clampTimerValue(count, 1, seedWords.length);
-    setDailyWordCount(safeCount);
-    setDeck(buildWordDeck(safeCount, wordProgress));
-    setWordPhase("study");
-    setWordIndex(0);
-    setIsFlipped(false);
-    setSelectedMeaning("");
-    setTypedAnswer("");
-    setCheckedMeaning(null);
-    setKnownWords([]);
-    setReviewWords([]);
-    setStudiedResults([]);
-  }
-
-  function restartReviewOnly() {
-    const reviewDeck = deck.filter((word) => reviewWords.includes(word.en));
-    setDeck(reviewDeck.length > 0 ? shuffleWords(reviewDeck) : buildWordDeck(dailyWordCount, wordProgress));
-    setWordPhase("study");
-    setWordIndex(0);
-    setIsFlipped(false);
-    setSelectedMeaning("");
-    setTypedAnswer("");
-    setCheckedMeaning(null);
-    setKnownWords([]);
-    setReviewWords([]);
-    setStudiedResults([]);
-  }
-
-  function goNextStudyWord() {
-    if (!currentWord) return;
-    setStudiedResults((current) => upsertStudiedResult(current, currentWord.en, "studied"));
-    setIsFlipped(false);
-    if (wordIndex + 1 >= deck.length) {
-      setWordPhase("quiz");
-      setWordIndex(0);
-      return;
-    }
-    setWordIndex((current) => current + 1);
-  }
-
-  function checkMeaning() {
-    if (!currentWord) return;
-    const normalizedTypedAnswer = typedAnswer.trim().toLowerCase();
-    const isCorrect =
-      quizType === "meaning"
-        ? selectedMeaning === currentWord.ko
-        : normalizedTypedAnswer.length > 0 && normalizedTypedAnswer === currentWord.en.toLowerCase();
-    if (quizType === "meaning" && !selectedMeaning) return;
-    if (quizType === "spelling" && !normalizedTypedAnswer) return;
-    setCheckedMeaning(isCorrect ? "correct" : "wrong");
-    setIsFlipped(true);
-    setWordProgress((current) => updateWordProgress(current, currentWord.en, isCorrect ? "correct" : "wrong"));
-    if (isCorrect) {
-      setKnownWords((current) => [...current, currentWord.en]);
-      setStudiedResults((current) => upsertStudiedResult(current, currentWord.en, "correct"));
-    } else {
-      setReviewWords((current) => [...current, currentWord.en]);
-      setStudiedResults((current) => upsertStudiedResult(current, currentWord.en, "wrong"));
-    }
-  }
-
-  function goNextWord() {
-    setIsFlipped(false);
-    setSelectedMeaning("");
-    setTypedAnswer("");
-    setCheckedMeaning(null);
-    window.setTimeout(() => setWordIndex((current) => current + 1), 140);
-  }
-
-  function speakWord(word: string) {
-    if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(word);
-    utterance.lang = "en-US";
-    utterance.rate = 0.86;
-    window.speechSynthesis.speak(utterance);
-  }
-
-  return (
-    <section className={styles.mainPanel} hidden={!isActive}>
-      <div className={styles.sectionHeader}>
-        <div>
-          <h2>단어 외우기</h2>
-        </div>
-        <label className={styles.wordCountControl}>
-          <span>오늘</span>
-          <input
-            type="number"
-            min="1"
-            value={dailyWordCount}
-            onChange={(event) => resizeDailyDeck(Number(event.target.value))}
-          />
-          <span>개</span>
-        </label>
-      </div>
-
-      {!isFinished && currentWord ? (
-        <div className={styles.flashWrap}>
-          <div className={styles.flashCounter}>{wordIndex + 1} / {deck.length}</div>
-          <div className={styles.flashProgress}>
-            <i style={{ width: `${progressRate}%` }} />
-          </div>
-          <button
-            type="button"
-            className={`${styles.flashCard} ${isFlipped ? styles.flippedCard : ""}`}
-            onClick={() => {
-              if (wordPhase === "study" || checkedMeaning) setIsFlipped((current) => !current);
-            }}
-          >
-            <span className={styles.flashFace}>
-              <span
-                role="button"
-                tabIndex={0}
-                className={styles.speakButton}
-                aria-label={`${currentWord.en} 발음 듣기`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  speakWord(currentWord.en);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" && event.key !== " ") return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  speakWord(currentWord.en);
-                }}
-              >
-                sound
-              </span>
-              <i>{currentWord.pos}</i>
-              <strong>{currentWord.en}</strong>
-              <em>{wordPhase === "study" ? "카드를 눌러 뜻과 예문을 확인하세요." : "알맞은 뜻을 고른 뒤 확인하세요."}</em>
-            </span>
-            <span className={`${styles.flashFace} ${styles.flashBack}`}>
-              <span
-                role="button"
-                tabIndex={0}
-                className={styles.speakButton}
-                aria-label={`${currentWord.en} 발음 듣기`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  speakWord(currentWord.en);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" && event.key !== " ") return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  speakWord(currentWord.en);
-                }}
-              >
-                sound
-              </span>
-              <strong>{currentWord.ko}</strong>
-              <em>{wordPhase === "study" ? currentWord.ex : `${checkedMeaning === "correct" ? "맞았어요." : "다음에 다시 볼 단어예요."} ${currentWord.ex}`}</em>
-            </span>
-          </button>
-          {wordPhase === "quiz" && (
-            <>
-              <div className={styles.quizTypeSwitch} aria-label="퀴즈 종류">
-                <button type="button" className={quizType === "meaning" ? styles.activePomoMode : ""} disabled={Boolean(checkedMeaning)} onClick={() => setQuizType("meaning")}>
-                  뜻 고르기
-                </button>
-                <button type="button" className={quizType === "spelling" ? styles.activePomoMode : ""} disabled={Boolean(checkedMeaning)} onClick={() => setQuizType("spelling")}>
-                  영어 입력
-                </button>
-              </div>
-              {quizType === "meaning" ? (
-                <div className={styles.meaningGrid} aria-label="뜻 선택">
-                  {meaningOptions.map((meaning) => (
-                    <button
-                      key={meaning}
-                      type="button"
-                      disabled={Boolean(checkedMeaning)}
-                      className={[
-                        selectedMeaning === meaning ? styles.selectedMeaning : "",
-                        checkedMeaning && meaning === currentWord.ko ? styles.correctMeaning : "",
-                        checkedMeaning === "wrong" && selectedMeaning === meaning ? styles.wrongMeaning : ""
-                      ].join(" ")}
-                      onClick={() => setSelectedMeaning(meaning)}
-                    >
-                      {meaning}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <label className={styles.spellingQuiz}>
-                  <span>{currentWord.ko}</span>
-                  <input
-                    value={typedAnswer}
-                    disabled={Boolean(checkedMeaning)}
-                    placeholder="영어 단어 입력"
-                    onChange={(event) => setTypedAnswer(event.target.value)}
-                  />
-                  {checkedMeaning === "wrong" && <em>정답: {currentWord.en}</em>}
-                </label>
-              )}
-            </>
-          )}
-          <div className={styles.flashActions}>
-            {wordPhase === "study" ? (
-              <button type="button" onClick={goNextStudyWord}>
-                {wordIndex + 1 >= deck.length ? "퀴즈 시작하기" : "다음 단어 확인하기"}
-              </button>
-            ) : checkedMeaning ? (
-              <button type="button" onClick={goNextWord}>다음</button>
-            ) : (
-              <button type="button" disabled={quizType === "meaning" ? !selectedMeaning : !typedAnswer.trim()} onClick={checkMeaning}>확인</button>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className={styles.vocabDone}>
-          <strong>학습 완료</strong>
-          <span>오늘 {deck.length}개 · 맞음 {knownWords.length} · 다시 볼 단어 {reviewWords.length} · 누적 {learnedWordCount}개</span>
-          <div className={styles.flashActions}>
-            {reviewWords.length > 0 && <button type="button" onClick={restartReviewOnly}>복습만 다시</button>}
-            <button type="button" onClick={() => restart()}>새로 시작</button>
-          </div>
-        </div>
-      )}
-      <div className={styles.learnedWordsPanel}>
-        <button type="button" onClick={() => setShowLearnedWords((current) => !current)}>
-          {showLearnedWords ? "진행 단어 닫기" : `진행 단어 ${studiedResults.length}개`}
-        </button>
-        {showLearnedWords && (
-          <div className={styles.learnedWordsList}>
-            {progressedWordItems.length > 0 ? (
-              progressedWordItems.map((word) => (
-                <span key={word.en}>
-                  <strong>{word.en}</strong>
-                  <em>{word.ko}</em>
-                  {word.result === "correct" && <b className={styles.correctWordMark}>맞음</b>}
-                  {word.result === "wrong" && <b className={styles.wrongWordMark}>틀림</b>}
-                  {word.result === "studied" && <b>학습</b>}
-                </span>
-              ))
-            ) : (
-              <p>아직 진행한 단어가 없어요.</p>
-            )}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selectedDate: string; isActive: boolean }) {
+function PomodoroTab({
+  tasks,
+  selectedDate,
+  isActive,
+  language
+}: {
+  tasks: Task[];
+  selectedDate: string;
+  isActive: boolean;
+  language: AppLanguage;
+}) {
   const [focusMinutes, setFocusMinutes] = useState(25);
   const [breakMinutes, setBreakMinutes] = useState(5);
   const [targetSets, setTargetSets] = useState(4);
@@ -2152,7 +2681,7 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
   const isBreakTimer = timerMode === "break" || (timerMode === "idle" && timerPreset === "break");
   const totalSeconds = isBreakTimer ? breakMinutes * 60 : focusMinutes * 60;
   const progressRate = totalSeconds <= 0 ? 0 : 1 - remainingSeconds / totalSeconds;
-  const timerLabel = isBreakTimer ? "휴식" : "집중";
+  const timerLabel = isBreakTimer ? (language === "ko" ? "휴식" : "Break") : language === "ko" ? "집중" : "Focus";
   const focusCandidates = tasks.filter((task) => !isTaskDoneOnDate(task, selectedDate) && task.status !== "cancelled");
 
   useEffect(() => {
@@ -2176,10 +2705,10 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
         setIsRunning(false);
         if (timerMode === "focus") {
           setCompletedSets((currentSet) => Math.min(targetSets, currentSet + 1));
-          window.setTimeout(() => window.alert("집중 시간이 끝났어요."), 0);
+          window.setTimeout(() => window.alert(language === "ko" ? "집중 시간이 끝났어요." : "Focus time is over."), 0);
         }
         if (timerMode === "break") {
-          window.setTimeout(() => window.alert("휴식 시간이 끝났어요."), 0);
+          window.setTimeout(() => window.alert(language === "ko" ? "휴식 시간이 끝났어요." : "Break time is over."), 0);
         }
         setTimerMode("idle");
         return 0;
@@ -2235,9 +2764,9 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
 
   return (
     <section className={styles.mainPanel} hidden={!isActive}>
-      <h2>타이머</h2>
+      <h2>{language === "ko" ? "타이머" : "Timer"}</h2>
       <div className={styles.pomodoroPanel}>
-        <div className={styles.pomoModes} aria-label="타이머 모드">
+        <div className={styles.pomoModes} aria-label={language === "ko" ? "타이머 모드" : "Timer mode"}>
           <button
             type="button"
             className={!isBreakTimer ? styles.activePomoMode : ""}
@@ -2247,7 +2776,7 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
               setRemainingSeconds(focusMinutes * 60);
             }}
           >
-            집중
+            {language === "ko" ? "집중" : "Focus"}
           </button>
           <button
             type="button"
@@ -2258,7 +2787,7 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
               setRemainingSeconds(breakMinutes * 60);
             }}
           >
-            휴식
+            {language === "ko" ? "휴식" : "Break"}
           </button>
         </div>
 
@@ -2274,7 +2803,7 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
 
         <div className={styles.timerSettings}>
           <label>
-            <span>집중</span>
+            <span>{language === "ko" ? "집중" : "Focus"}</span>
             <input
               type="number"
               min="1"
@@ -2283,10 +2812,10 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
               disabled={!isEditingSettings}
               onChange={(event) => updateFocusMinutes(Number(event.target.value))}
             />
-            <em>분</em>
+            <em>{language === "ko" ? "분" : "min"}</em>
           </label>
           <label>
-            <span>휴식</span>
+            <span>{language === "ko" ? "휴식" : "Break"}</span>
             <input
               type="number"
               min="1"
@@ -2295,10 +2824,10 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
               disabled={!isEditingSettings}
               onChange={(event) => updateBreakMinutes(Number(event.target.value))}
             />
-            <em>분</em>
+            <em>{language === "ko" ? "분" : "min"}</em>
           </label>
           <label>
-            <span>반복</span>
+            <span>{language === "ko" ? "반복" : "Sets"}</span>
             <input
               type="number"
               min="1"
@@ -2307,27 +2836,27 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
               disabled={!isEditingSettings}
               onChange={(event) => updateTargetSets(Number(event.target.value))}
             />
-            <em>회</em>
+            <em>{language === "ko" ? "회" : "sets"}</em>
           </label>
         </div>
 
         <div className={styles.timerActions}>
           {timerMode === "idle" && (
             <>
-              <button type="button" onClick={startSelectedPreset}>{remainingSeconds === 0 ? "다시 시작" : "시작"}</button>
-              <button type="button" onClick={resetTimer}>리셋</button>
+              <button type="button" onClick={startSelectedPreset}>{remainingSeconds === 0 ? (language === "ko" ? "다시 시작" : "Restart") : language === "ko" ? "시작" : "Start"}</button>
+              <button type="button" onClick={resetTimer}>{language === "ko" ? "리셋" : "Reset"}</button>
             </>
           )}
           {timerMode === "focus" && (
             <>
-              <button type="button" onClick={() => setIsRunning((current) => !current)}>{isRunning ? "잠깐 멈춤" : "다시 시작"}</button>
-              <button type="button" onClick={resetTimer}>리셋</button>
+              <button type="button" onClick={() => setIsRunning((current) => !current)}>{isRunning ? (language === "ko" ? "잠깐 멈춤" : "Pause") : language === "ko" ? "다시 시작" : "Resume"}</button>
+              <button type="button" onClick={resetTimer}>{language === "ko" ? "리셋" : "Reset"}</button>
             </>
           )}
           {timerMode === "break" && (
             <>
-              <button type="button" onClick={() => setIsRunning((current) => !current)}>{isRunning ? "잠깐 멈춤" : "다시 시작"}</button>
-              <button type="button" onClick={resetTimer}>리셋</button>
+              <button type="button" onClick={() => setIsRunning((current) => !current)}>{isRunning ? (language === "ko" ? "잠깐 멈춤" : "Pause") : language === "ko" ? "다시 시작" : "Resume"}</button>
+              <button type="button" onClick={resetTimer}>{language === "ko" ? "리셋" : "Reset"}</button>
             </>
           )}
         </div>
@@ -2336,13 +2865,13 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
           {Array.from({ length: Math.min(targetSets, 12) }).map((_, index) => (
             <span key={index} className={index < completedSets ? styles.activePomoDot : ""} />
           ))}
-          <strong>오늘 {completedSets}회 집중</strong>
+          <strong>{language === "ko" ? `오늘 ${completedSets}회 집중` : `${completedSets} focus sessions today`}</strong>
         </div>
 
         <label className={styles.pomoFocus}>
-          <span>지금 집중할 일</span>
+          <span>{language === "ko" ? "지금 집중할 일" : "Focus Task"}</span>
           <select value={focusTaskId} onChange={(event) => setFocusTaskId(event.target.value)}>
-            <option value="">선택 안 함</option>
+            <option value="">{language === "ko" ? "선택 안 함" : "No task selected"}</option>
             {focusCandidates.map((task) => (
               <option key={task.id} value={task.id}>
                 {task.title}
@@ -2355,12 +2884,60 @@ function PomodoroTab({ tasks, selectedDate, isActive }: { tasks: Task[]; selecte
   );
 }
 
-function MemoTab() {
+function MemoTab({
+  isActive,
+  language,
+  cloudUserId,
+  onCloudMessage
+}: {
+  isActive: boolean;
+  language: AppLanguage;
+  cloudUserId: string | null;
+  onCloudMessage: (message: string) => void;
+}) {
   const [memos, setMemos] = useState<Memo[]>(() => loadStoredMemos());
   const [content, setContent] = useState("");
+  const isApplyingRemoteMemos = useRef(false);
+  const hasReceivedRemoteMemos = useRef(false);
+
+  useEffect(() => {
+    if (!cloudUserId) {
+      hasReceivedRemoteMemos.current = false;
+      return;
+    }
+
+    return subscribeUserAppData<Memo[]>(
+      cloudUserId,
+      "memos",
+      (remoteMemos) => {
+        if (!remoteMemos && !hasReceivedRemoteMemos.current && memos.length > 0) {
+          void saveUserAppData(cloudUserId, "memos", memos);
+          hasReceivedRemoteMemos.current = true;
+          return;
+        }
+
+        hasReceivedRemoteMemos.current = true;
+        if (!remoteMemos) return;
+
+        isApplyingRemoteMemos.current = true;
+        setMemos(remoteMemos.filter(isMemo));
+      },
+      () => onCloudMessage("동기화 오류: 메모는 로컬에 저장 중")
+    );
+  }, [cloudUserId]);
 
   useEffect(() => {
     saveStoredMemos(memos);
+    if (isApplyingRemoteMemos.current) {
+      isApplyingRemoteMemos.current = false;
+      return;
+    }
+
+    if (cloudUserId && hasReceivedRemoteMemos.current) {
+      void saveUserAppData(cloudUserId, "memos", memos).catch(() => {
+        onCloudMessage("동기화 오류: 메모는 로컬에 저장 중");
+      });
+    }
   }, [memos]);
 
   function addMemo(event: FormEvent<HTMLFormElement>) {
@@ -2384,10 +2961,10 @@ function MemoTab() {
   }
 
   return (
-    <section className={styles.mainPanel}>
+    <section className={styles.mainPanel} hidden={!isActive}>
       <div className={styles.sectionHeader}>
         <div>
-          <h2>메모 <span className={styles.titleCount}>{memos.length}</span></h2>
+          <h2>{language === "ko" ? "메모" : "Memo"} <span className={styles.titleCount}>{memos.length}</span></h2>
         </div>
       </div>
 
@@ -2395,10 +2972,10 @@ function MemoTab() {
         <textarea
           value={content}
           maxLength={600}
-          placeholder="예: 다음에 병원 예약할 때 필요한 서류 확인하기"
+          placeholder={language === "ko" ? "예: 다음에 병원 예약할 때 필요한 서류 확인하기" : "e.g. Documents needed for the next appointment"}
           onChange={(event) => setContent(event.target.value)}
         />
-        <button type="submit">메모 추가</button>
+        <button type="submit">{language === "ko" ? "메모 추가" : "Add Memo"}</button>
       </form>
 
       <div className={styles.memoList}>
@@ -2408,12 +2985,12 @@ function MemoTab() {
               <p>{memo.content}</p>
               <div>
                 <time>{formatMemoTime(memo.createdAt)}</time>
-                <button type="button" onClick={() => deleteMemo(memo.id)}>삭제</button>
+                <button type="button" onClick={() => deleteMemo(memo.id)}>{language === "ko" ? "삭제" : "Delete"}</button>
               </div>
             </article>
           ))
         ) : (
-          <p className={styles.emptyMemo}>아직 메모가 없어요.</p>
+          <p className={styles.emptyMemo}>{language === "ko" ? "아직 메모가 없어요." : "No memos yet."}</p>
         )}
       </div>
     </section>
@@ -2466,88 +3043,6 @@ function clampTimerValue(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-function shuffleWords<T>(words: T[]) {
-  return [...words].sort(() => Math.random() - 0.5);
-}
-
-function buildWordDeck(count: number, progress: WordProgressRecord[], excludeWords = new Set<string>()) {
-  const safeCount = clampTimerValue(count, 1, seedWords.length);
-  const today = getLocalDateKey();
-  const progressMap = new Map(progress.map((record) => [record.en, record]));
-  const reviewTargetCount = Math.min(Math.round(safeCount / 3), safeCount);
-  const dueReviewWords = seedWords.filter((word) => {
-    if (excludeWords.has(word.en)) return false;
-    const record = progressMap.get(word.en);
-    if (!record || record.seenCount <= 0) return false;
-    return record.nextReviewAt <= today;
-  });
-  const recentReviewWords = seedWords.filter((word) => {
-    if (excludeWords.has(word.en)) return false;
-    const record = progressMap.get(word.en);
-    if (!record || record.seenCount <= 0) return false;
-    return daysBetween(record.lastSeenAt ?? today, today) <= 3;
-  });
-  const newWords = seedWords.filter((word) => !excludeWords.has(word.en) && !progressMap.has(word.en));
-  const learnedWords = seedWords.filter((word) => !excludeWords.has(word.en) && progressMap.has(word.en));
-  const deck: typeof seedWords = [];
-
-  addUniqueWords(deck, shuffleWords(dueReviewWords), reviewTargetCount);
-  addUniqueWords(deck, shuffleWords(recentReviewWords), reviewTargetCount);
-  addUniqueWords(deck, shuffleWords(newWords), safeCount);
-  addUniqueWords(deck, shuffleWords(learnedWords), safeCount);
-  addUniqueWords(deck, shuffleWords(seedWords.filter((word) => !excludeWords.has(word.en))), safeCount);
-
-  return deck.slice(0, safeCount);
-}
-
-function addUniqueWords(target: typeof seedWords, source: typeof seedWords, maxCount: number) {
-  const existingWords = new Set(target.map((word) => word.en));
-  for (const word of source) {
-    if (target.length >= maxCount) return;
-    if (existingWords.has(word.en)) continue;
-    target.push(word);
-    existingWords.add(word.en);
-  }
-}
-
-function getProtectedWordCount(wordPhase: "study" | "quiz", wordIndex: number) {
-  if (wordPhase === "study") return wordIndex + 1;
-  return Number.POSITIVE_INFINITY;
-}
-
-function updateWordProgress(records: WordProgressRecord[], en: string, result: "studied" | "correct" | "wrong") {
-  const today = getLocalDateKey();
-  const existing = records.find((record) => record.en === en);
-  const baseRecord: WordProgressRecord = existing ?? {
-    en,
-    seenCount: 0,
-    correctCount: 0,
-    wrongCount: 0,
-    lastSeenAt: null,
-    nextReviewAt: today,
-    lastResult: "studied"
-  };
-  const updatedRecord: WordProgressRecord = {
-    ...baseRecord,
-    seenCount: baseRecord.seenCount + 1,
-    correctCount: baseRecord.correctCount + (result === "correct" ? 1 : 0),
-    wrongCount: baseRecord.wrongCount + (result === "wrong" ? 1 : 0),
-    lastSeenAt: today,
-    nextReviewAt: scheduleNextWordReview(today, result, baseRecord.correctCount, baseRecord.wrongCount),
-    lastResult: result
-  };
-
-  if (!existing) return [...records, updatedRecord];
-  return records.map((record) => (record.en === en ? updatedRecord : record));
-}
-
-function scheduleNextWordReview(today: string, result: "studied" | "correct" | "wrong", correctCount: number, wrongCount: number) {
-  if (result === "wrong") return shiftDate(today, 1);
-  if (result === "studied") return shiftDate(today, 1 + Math.floor(Math.random() * 3));
-  if (wrongCount > 0) return shiftDate(today, 1 + Math.floor(Math.random() * 2));
-  if (correctCount < 2) return shiftDate(today, 1 + Math.floor(Math.random() * 3));
-  return shiftDate(today, 2 + Math.floor(Math.random() * 2));
-}
 
 function getLocalDateKey(date = new Date()) {
   const year = date.getFullYear();
@@ -2556,49 +3051,6 @@ function getLocalDateKey(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-function loadWordProgress() {
-  try {
-    const rawValue = window.localStorage.getItem(learnedWordsStorageKey);
-    if (!rawValue) return [];
-    const parsed = JSON.parse(rawValue);
-    if (!Array.isArray(parsed)) return [];
-    if (parsed.every((value) => typeof value === "string")) {
-      return parsed.map((en) => ({
-        en,
-        seenCount: 1,
-        correctCount: 1,
-        wrongCount: 0,
-        lastSeenAt: shiftDate(getLocalDateKey(), -1),
-        nextReviewAt: shiftDate(getLocalDateKey(), 1),
-        lastResult: "correct" as const
-      }));
-    }
-    return parsed.filter(isWordProgressRecord);
-  } catch {
-    return [];
-  }
-}
-
-function saveWordProgress(words: WordProgressRecord[]) {
-  try {
-    window.localStorage.setItem(learnedWordsStorageKey, JSON.stringify(words));
-  } catch {
-    // Local word progress should never block the study flow.
-  }
-}
-
-function isWordProgressRecord(value: unknown): value is WordProgressRecord {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Partial<WordProgressRecord>;
-  return (
-    typeof record.en === "string" &&
-    typeof record.seenCount === "number" &&
-    typeof record.correctCount === "number" &&
-    typeof record.wrongCount === "number" &&
-    typeof record.nextReviewAt === "string" &&
-    (record.lastResult === "studied" || record.lastResult === "correct" || record.lastResult === "wrong")
-  );
-}
 
 function loadAppSettings(): { language: AppLanguage; fontMode: FontMode } {
   try {
@@ -2622,12 +3074,13 @@ function saveAppSettings(settings: { language: AppLanguage; fontMode: FontMode }
   }
 }
 
-function backupAppData(tasks: Task[]) {
+function backupAppData(tasks: Task[], schedules: Schedule[]) {
   const payload = {
     app: "잊지 마",
     version: 1,
     exportedAt: new Date().toISOString(),
     tasks,
+    schedules,
     localStorage: {
       settings: readLocalStorageJson(appSettingsStorageKey),
       wordProgress: readLocalStorageJson(learnedWordsStorageKey),
@@ -2644,6 +3097,30 @@ function backupAppData(tasks: Task[]) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+async function deleteAppData(userId: string | null, onDeleted: () => void) {
+  const confirmed = window.confirm("저장된 할일, 단어 기록, 메모, 계획표 루틴을 삭제할까요? 설정값은 유지됩니다.");
+  if (!confirmed) return;
+
+  try {
+    saveStoredTasks([]);
+    saveStoredSchedules([]);
+    window.localStorage.setItem(learnedWordsStorageKey, JSON.stringify([]));
+    window.localStorage.setItem(memoStorageKey, JSON.stringify([]));
+    window.localStorage.setItem(planBlocksStorageKey, JSON.stringify([]));
+    if (userId) {
+      await Promise.all([
+        saveUserTasks(userId, []),
+        saveUserAppData(userId, "schedules", []),
+        saveUserAppData(userId, "wordProgress", []),
+        saveUserAppData(userId, "memos", []),
+        saveUserAppData(userId, "planBlocks", [])
+      ]);
+    }
+  } finally {
+    onDeleted();
+  }
 }
 
 function readLocalStorageJson(key: string) {
@@ -2731,12 +3208,3 @@ function formatMemoTime(value: string) {
   });
 }
 
-function upsertStudiedResult(
-  results: Array<{ en: string; result: "studied" | "correct" | "wrong" }>,
-  en: string,
-  result: "studied" | "correct" | "wrong"
-) {
-  const existingIndex = results.findIndex((item) => item.en === en);
-  if (existingIndex < 0) return [...results, { en, result }];
-  return results.map((item, index) => (index === existingIndex ? { en, result } : item));
-}

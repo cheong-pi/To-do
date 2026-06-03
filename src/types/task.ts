@@ -10,6 +10,10 @@ export type TaskKindOption = "no_deadline" | "today" | "dday" | "repeat";
 
 export type TaskOwner = "task" | "schedule";
 
+export type ScheduleKind = "date" | "deadline" | "period";
+
+export type ScheduleStatus = "planned" | "done" | "cancelled";
+
 export type TodaySortGroup =
   | "timed_today"
   | "pulled_to_today"
@@ -37,6 +41,7 @@ export type Task = {
   remainingPercent: number;
   reminderAt: string | null;
   parentTaskId: string | null;
+  scheduleId?: string | null;
   isFixed?: boolean;
   calendarColor?: string;
   routineId?: string | null;
@@ -48,6 +53,22 @@ export type Task = {
   isGenerated?: boolean;
   isManuallyEdited?: boolean;
   memo: string;
+};
+
+export type Schedule = {
+  id: string;
+  title: string;
+  startDate: string;
+  endDate: string;
+  time: string | null;
+  kind: ScheduleKind;
+  status: ScheduleStatus;
+  reminderAt?: string | null;
+  calendarColor?: string;
+  linkedTaskId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  memo?: string;
 };
 
 export type Routine = {

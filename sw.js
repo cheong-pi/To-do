@@ -1,4 +1,4 @@
-const CACHE_NAME = "dont-forget-v1";
+const CACHE_NAME = "dont-forget-v2";
 const APP_FILES = [
   "./",
   "./index.html",
@@ -42,6 +42,18 @@ self.addEventListener("fetch", (event) => {
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
       return fetch(event.request);
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      const existingClient = clients.find((client) => "focus" in client);
+      if (existingClient) return existingClient.focus();
+      if (self.clients.openWindow) return self.clients.openWindow("./");
+      return undefined;
     })
   );
 });
