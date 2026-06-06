@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import styles from "./TodayView.module.css";
-import { saveUserAppData, subscribeUserAppData } from "../../services/userAppDataCloudStorage";
 import type { WordEntry } from "./wordBank";
 
 type AppLanguage = "ko" | "en";
@@ -24,13 +23,11 @@ type WordsTabProps = {
   isActive: boolean;
   language: AppLanguage;
   dataResetToken: number;
-  cloudUserId: string | null;
-  onCloudMessage: (message: string) => void;
 };
 
 const learnedWordsStorageKey = "dont-forget-learned-words";
 
-export default function WordsTab({ isActive, language, dataResetToken, cloudUserId, onCloudMessage }: WordsTabProps) {
+export default function WordsTab({ isActive, language, dataResetToken }: WordsTabProps) {
   const [wordBank, setWordBank] = useState<WordEntry[] | null>(null);
   const [wordProgress, setWordProgress] = useState<WordProgressRecord[]>(() => loadWordProgress());
   const [dailyWordCount, setDailyWordCount] = useState(20);
@@ -45,8 +42,6 @@ export default function WordsTab({ isActive, language, dataResetToken, cloudUser
   const [reviewWords, setReviewWords] = useState<string[]>([]);
   const [studiedResults, setStudiedResults] = useState<StudiedResult[]>([]);
   const [showLearnedWords, setShowLearnedWords] = useState(false);
-  const isApplyingRemoteWordProgress = useRef(false);
-  const hasReceivedRemoteWordProgress = useRef(false);
 
   const currentWord = deck[wordIndex];
   const quizType = wordPhase === "quiz" ? getWordQuizType(wordIndex) : "meaning";
@@ -85,47 +80,8 @@ export default function WordsTab({ isActive, language, dataResetToken, cloudUser
   }, [dailyWordCount, isActive, wordBank]);
 
   useEffect(() => {
-    if (!cloudUserId) {
-      hasReceivedRemoteWordProgress.current = false;
-      return;
-    }
-
-    return subscribeUserAppData<WordProgressRecord[]>(
-      cloudUserId,
-      "wordProgress",
-      (remoteWordProgress) => {
-        if (!remoteWordProgress && !hasReceivedRemoteWordProgress.current && wordProgress.length > 0) {
-          void saveUserAppData(cloudUserId, "wordProgress", wordProgress);
-          hasReceivedRemoteWordProgress.current = true;
-          return;
-        }
-
-        hasReceivedRemoteWordProgress.current = true;
-        if (!remoteWordProgress) return;
-
-        const nextWordProgress = remoteWordProgress.filter(isWordProgressRecord);
-        isApplyingRemoteWordProgress.current = true;
-        setWordProgress(nextWordProgress);
-        if (wordBank) setDeck(buildWordDeck(dailyWordCount, nextWordProgress, wordBank));
-        resetWordSession();
-      },
-      () => onCloudMessage(language === "ko" ? "동기화 오류: 단어 기록은 로컬에 저장 중" : "Sync error: saving word progress locally")
-    );
-  }, [cloudUserId, dailyWordCount, language, wordBank, wordProgress]);
-
-  useEffect(() => {
     saveWordProgress(wordProgress);
-    if (isApplyingRemoteWordProgress.current) {
-      isApplyingRemoteWordProgress.current = false;
-      return;
-    }
-
-    if (cloudUserId && hasReceivedRemoteWordProgress.current) {
-      void saveUserAppData(cloudUserId, "wordProgress", wordProgress).catch(() => {
-        onCloudMessage(language === "ko" ? "동기화 오류: 단어 기록은 로컬에 저장 중" : "Sync error: saving word progress locally");
-      });
-    }
-  }, [cloudUserId, language, onCloudMessage, wordProgress]);
+  }, [wordProgress]);
 
   useEffect(() => {
     if (dataResetToken === 0) return;

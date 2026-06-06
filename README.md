@@ -10,9 +10,8 @@
 - React
 - TypeScript
 - CSS Modules
-- Firebase Auth
-- Firestore
-- Firebase Hosting
+- Google OAuth
+- Google Drive `appDataFolder`
 
 ## 개발 실행
 
@@ -47,9 +46,15 @@ npm run build
 - 단어 20개 학습 흐름을 위한 화면 자리
 - 뽀모도로 마지막 설정 화면 자리
 
-## Firebase
+## Google Drive 동기화
 
-Firebase 설정값은 `.env.example`을 복사해 `.env`에 입력합니다.
+Google Cloud에서 Drive API와 웹 OAuth 클라이언트를 설정한 후 `.env.example`을 복사해 `.env`에 클라이언트 ID를 입력합니다.
+
+```env
+VITE_GOOGLE_CLIENT_ID=발급받은_클라이언트_ID
+```
+
+사용자 데이터는 각 사용자의 Google Drive 앱 전용 숨김 폴더에 저장됩니다. 자세한 설정은 `harness/google-drive-sync.md`를 참고합니다.
 
 ```powershell
 Copy-Item .env.example .env

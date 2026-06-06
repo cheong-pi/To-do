@@ -73,73 +73,56 @@
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px;
+  gap: 4px;
   position: sticky;
-  top: 12px;
+  top: 10px;
   z-index: 30;
-  margin-bottom: -3px;
-  padding: 0 8px;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+  margin-bottom: 12px;
+  padding: 6px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-medium);
+  background: color-mix(in srgb, var(--color-surface) 96%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
 }
 
 .tabs button {
   position: relative;
-  min-height: 40px;
-  min-width: 84px;
-  border: 1px solid var(--color-line);
-  border-bottom-color: rgba(234, 223, 202, 0.35);
-  border-radius: 13px 13px 5px 5px;
-  background: #fff2bd;
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 13px;
+  border: 0;
+  border-radius: var(--radius-small);
+  background: transparent;
   color: var(--color-muted);
   cursor: pointer;
-  font-family: var(--font-display);
-  font-size: 0.96rem;
+  font-family: var(--font-body);
+  font-size: 0.92rem;
   font-weight: 600;
-  padding: 0 14px;
-  box-shadow: inset 0 -8px 12px -14px rgba(120, 90, 30, 0.6);
-  transform: translateY(10px);
   transition:
-    background 0.18s ease,
     color 0.18s ease,
-    box-shadow 0.18s ease,
-    transform 0.18s ease;
-}
-
-.tabs button:nth-child(2n) {
-  background: #ffe8a3;
-  transform: translateY(10px);
-}
-
-.tabs button:nth-child(3n) {
-  background: #fff7cf;
-  transform: translateY(10px);
+    opacity 0.18s ease;
 }
 
 .tabs button:hover {
-  background: #ffe680;
+  background: var(--color-surface-soft);
   color: var(--color-ink);
-  transform: translateY(6px);
 }
 
 .tabs .activeTab {
-  z-index: 2;
-  background: var(--color-surface);
-  border-bottom-color: var(--color-surface);
+  background: transparent;
   color: var(--color-ink);
-  box-shadow: 0 -5px 20px -11px rgba(120, 90, 30, 0.5);
-  transform: translateY(0);
+  font-weight: 800;
 }
 
 .tabs .activeTab::after {
   position: absolute;
-  right: 10px;
-  bottom: -7px;
-  left: 10px;
-  height: 8px;
-  border-radius: 0 0 8px 8px;
-  background: var(--color-surface);
+  right: 12px;
+  bottom: 2px;
+  left: 12px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand);
   content: "";
 }
 
@@ -1864,10 +1847,6 @@
   border-radius: 50%;
 }
 
-.breathingTimer {
-  animation: breathe 5s ease-in-out infinite;
-}
-
 .pomoRing {
   position: absolute;
   inset: 0;
@@ -2031,16 +2010,6 @@
   font-weight: 800;
   padding: 0 14px;
   text-overflow: ellipsis;
-}
-
-@keyframes breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.025);
-  }
 }
 
 .calendarGrid {
@@ -2290,7 +2259,8 @@
   .tabs {
     overflow-x: auto;
     flex-wrap: nowrap;
-    padding: 0 2px;
+    gap: 2px;
+    padding: 5px;
     scrollbar-width: none;
   }
 
@@ -2299,8 +2269,9 @@
   }
 
   .tabs button {
-    min-width: 76px;
+    min-width: max-content;
     flex: 0 0 auto;
+    padding: 0 12px;
   }
 
   .taskRow {

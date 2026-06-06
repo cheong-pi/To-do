@@ -1,4 +1,3 @@
-import { mockTasks } from "../features/today/mockTasks";
 import type { Task } from "../types/task";
 
 const storageKey = "dont-forget.tasks.v1";
@@ -9,17 +8,17 @@ type StoredTasks = {
 };
 
 export function loadStoredTasks(): Task[] {
-  if (!canUseStorage()) return mockTasks;
+  if (!canUseStorage()) return [];
 
   const raw = window.localStorage.getItem(storageKey);
-  if (!raw) return mockTasks;
+  if (!raw) return [];
 
   try {
     const parsed = JSON.parse(raw) as Partial<StoredTasks>;
-    if (parsed.version !== 1 || !Array.isArray(parsed.tasks)) return sanitizeTasks(mockTasks);
+    if (parsed.version !== 1 || !Array.isArray(parsed.tasks)) return [];
     return sanitizeTasks(parsed.tasks);
   } catch {
-    return sanitizeTasks(mockTasks);
+    return [];
   }
 }
 

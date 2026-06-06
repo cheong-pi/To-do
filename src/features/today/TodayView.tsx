@@ -1,13 +1,18 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { sortTodayTasks } from "./todayRules";
 import styles from "./TodayView.module.css";
-import { isFirebaseConfigured, signInWithGoogle, signOutUser, subscribeAuthState } from "../../services/firebase";
-import { saveUserTasks, subscribeUserTasks } from "../../services/taskCloudStorage";
 import { loadStoredSchedules, saveStoredSchedules } from "../../services/scheduleStorage";
 import { loadStoredTasks, saveStoredTasks } from "../../services/taskStorage";
-import { saveUserAppData, subscribeUserAppData } from "../../services/userAppDataCloudStorage";
+import {
+  connectGoogleDrive,
+  createDriveBackup,
+  disconnectGoogleDrive,
+  getLastDriveSync,
+  isGoogleDriveConfigured,
+  isGoogleDriveConnected,
+  syncToGoogleDrive
+} from "../../services/googleDriveSync";
 import type { RepeatKind, Schedule, Task, TaskKindOption, TaskOwner, TaskSource, TaskStatus, TodaySortGroup } from "../../types/task";
-import type { User } from "firebase/auth";
 
 type AppTab = "plan" | "tasks" | "calendar" | "words" | "pomodoro" | "memo" | "settings";
 
@@ -18,16 +23,12 @@ type FontMode = "default" | "system";
 type ReminderPermission = NotificationPermission | "unsupported";
 
 const WordsTab = lazy(() => import("./WordsTab"));
+const PomodoroTab = lazy(() => import("./PomodoroTab"));
+const MemoTab = lazy(() => import("./MemoTab"));
 
 type AppSettings = {
   language: AppLanguage;
   fontMode: FontMode;
-};
-
-type Memo = {
-  id: string;
-  content: string;
-  createdAt: string;
 };
 
 type PlanBlock = {
@@ -111,24 +112,25 @@ export function TodayView() {
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [dataResetToken, setDataResetToken] = useState(0);
   const [hasOpenedWords, setHasOpenedWords] = useState(false);
+  const [hasOpenedPomodoro, setHasOpenedPomodoro] = useState(false);
+  const [hasOpenedMemo, setHasOpenedMemo] = useState(false);
   const initialTasks = useMemo(() => loadStoredTasks(), []);
   const [tasks, setTasks] = useState<Task[]>(() => initialTasks.filter((task) => !isSchedulerOwnedTask(task)));
   const [schedules, setSchedules] = useState<Schedule[]>(() =>
     mergeSchedules(loadStoredSchedules(), migrateScheduleTasks(initialTasks))
   );
-  const [selectedDate, setSelectedDate] = useState("2026-06-02");
+  const [selectedDate, setSelectedDate] = useState(() => getLocalDateKey());
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [activeCreatePanel, setActiveCreatePanel] = useState<"task" | "schedule" | null>(null);
-  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [isDriveConnected, setIsDriveConnected] = useState(() => isGoogleDriveConnected());
   const [authMessage, setAuthMessage] = useState(
-    isFirebaseConfigured() ? "Google 로그인 준비됨" : "Firebase 설정 필요"
+    isGoogleDriveConfigured()
+      ? getLastDriveSync()
+        ? `마지막 Drive 동기화 · ${formatSyncTime(getLastDriveSync()!)}`
+        : "Google Drive 연결 준비됨"
+      : "Google Drive 설정 필요"
   );
-  const isApplyingRemoteTasks = useRef(false);
-  const hasReceivedRemoteTasks = useRef(false);
-  const isApplyingRemoteSettings = useRef(false);
-  const hasReceivedRemoteSettings = useRef(false);
-  const isApplyingRemoteSchedules = useRef(false);
-  const hasReceivedRemoteSchedules = useRef(false);
+  const lastUploadedSnapshot = useRef("");
   const firedReminderKeys = useRef(new Set<string>());
 
   const todayTasks = useMemo(
@@ -155,155 +157,46 @@ export function TodayView() {
 
   useEffect(() => {
     if (activeTab === "words") setHasOpenedWords(true);
+    if (activeTab === "pomodoro") setHasOpenedPomodoro(true);
+    if (activeTab === "memo") setHasOpenedMemo(true);
   }, [activeTab]);
 
   useEffect(() => {
-    if (!isFirebaseConfigured()) return;
-
-    return subscribeAuthState((user) => {
-      setAuthUser(user);
-      hasReceivedRemoteTasks.current = false;
-      hasReceivedRemoteSettings.current = false;
-      hasReceivedRemoteSchedules.current = false;
-      setAuthMessage(user ? `${user.displayName ?? "Google"} 동기화 중` : "Google 로그인 준비됨");
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!authUser) return;
-
-    const localSettings: AppSettings = { language: appLanguage, fontMode };
-
-    return subscribeUserAppData<AppSettings>(
-      authUser.uid,
-      "settings",
-      (remoteSettings) => {
-        if (!remoteSettings && !hasReceivedRemoteSettings.current) {
-          void saveUserAppData(authUser.uid, "settings", localSettings);
-          hasReceivedRemoteSettings.current = true;
-          return;
-        }
-
-        hasReceivedRemoteSettings.current = true;
-        if (!remoteSettings) return;
-
-        isApplyingRemoteSettings.current = true;
-        setAppLanguage(remoteSettings.language === "en" ? "en" : "ko");
-        setFontMode(remoteSettings.fontMode === "system" ? "system" : "default");
-      },
-      () => {
-        setAuthMessage("동기화 오류: 설정은 로컬에 저장 중");
-      }
-    );
-  }, [authUser]);
-
-  useEffect(() => {
-    if (!authUser) return;
-
-    return subscribeUserTasks(
-      authUser.uid,
-      (remoteTasks) => {
-        const remoteAppTasks = remoteTasks.filter((task) => !isSchedulerOwnedTask(task));
-        const remoteSchedules = migrateScheduleTasks(remoteTasks);
-
-        if (remoteAppTasks.length === 0 && !hasReceivedRemoteTasks.current && tasks.length > 0) {
-          void saveUserTasks(authUser.uid, tasks);
-          hasReceivedRemoteTasks.current = true;
-          setAuthMessage(`${authUser.displayName ?? "Google"} 동기화 완료`);
-          return;
-        }
-
-        hasReceivedRemoteTasks.current = true;
-        isApplyingRemoteTasks.current = true;
-        setTasks(remoteAppTasks);
-        if (remoteSchedules.length > 0) {
-          setSchedules((current) => mergeSchedules(current, remoteSchedules));
-        }
-        setAuthMessage(`${authUser.displayName ?? "Google"} 동기화 완료`);
-      },
-      () => {
-        setAuthMessage("동기화 오류: 로컬 저장 중");
-      }
-    );
-  }, [authUser]);
-
-  useEffect(() => {
-    if (!authUser) return;
-
-    return subscribeUserAppData<Schedule[]>(
-      authUser.uid,
-      "schedules",
-      (remoteSchedules) => {
-        if (!remoteSchedules && !hasReceivedRemoteSchedules.current && schedules.length > 0) {
-          void saveUserAppData(authUser.uid, "schedules", schedules);
-          hasReceivedRemoteSchedules.current = true;
-          return;
-        }
-
-        hasReceivedRemoteSchedules.current = true;
-        if (!remoteSchedules) return;
-
-        isApplyingRemoteSchedules.current = true;
-        setSchedules(remoteSchedules.filter(isSchedule));
-      },
-      () => {
-        setAuthMessage("동기화 오류: 일정을 로컬에 저장 중");
-      }
-    );
-  }, [authUser]);
-
-  useEffect(() => {
-    const saveTimer = window.setTimeout(() => {
-      if (isApplyingRemoteSettings.current) {
-        isApplyingRemoteSettings.current = false;
-        return;
-      }
-
-      if (authUser && hasReceivedRemoteSettings.current) {
-        void saveUserAppData(authUser.uid, "settings", { language: appLanguage, fontMode }).catch(() => {
-          setAuthMessage("동기화 오류: 설정은 로컬에 저장 중");
-        });
-      }
-    }, 400);
-
-    return () => window.clearTimeout(saveTimer);
-  }, [authUser, appLanguage, fontMode]);
-
-  useEffect(() => {
-    const saveTimer = window.setTimeout(() => {
-      if (!authUser || !hasReceivedRemoteTasks.current || isApplyingRemoteTasks.current) return;
-      void saveUserTasks(authUser.uid, tasks).catch(() => {
-        setAuthMessage("동기화 오류: 로컬 저장 중");
-      });
-    }, 400);
-
-    return () => window.clearTimeout(saveTimer);
-  }, [authUser, tasks]);
-
-  useEffect(() => {
-    const saveTimer = window.setTimeout(() => {
-      if (!authUser || !hasReceivedRemoteSchedules.current || isApplyingRemoteSchedules.current) return;
-      void saveUserAppData(authUser.uid, "schedules", schedules).catch(() => {
-        setAuthMessage("동기화 오류: 일정을 로컬에 저장 중");
-      });
-    }, 400);
-
-    return () => window.clearTimeout(saveTimer);
-  }, [authUser, schedules]);
-
-  useEffect(() => {
     saveStoredTasks(tasks);
-    if (isApplyingRemoteTasks.current) {
-      isApplyingRemoteTasks.current = false;
-    }
   }, [tasks]);
 
   useEffect(() => {
     saveStoredSchedules(schedules);
-    if (isApplyingRemoteSchedules.current) {
-      isApplyingRemoteSchedules.current = false;
-    }
   }, [schedules]);
+
+  useEffect(() => {
+    if (!isDriveConnected) return;
+
+    const sync = async () => {
+      const snapshot = JSON.stringify(createDriveBackup().data);
+      if (snapshot === lastUploadedSnapshot.current) return;
+
+      try {
+        const updatedAt = await syncToGoogleDrive();
+        lastUploadedSnapshot.current = snapshot;
+        setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(updatedAt)}`);
+      } catch {
+        setIsDriveConnected(false);
+        setAuthMessage("Drive 연결이 만료되었습니다. 다시 연결해 주세요.");
+      }
+    };
+
+    const timer = window.setInterval(() => void sync(), 15_000);
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") void sync();
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [isDriveConnected]);
 
   useEffect(() => {
     if (notificationPermission !== "granted") return;
@@ -456,23 +349,48 @@ export function TodayView() {
     setSchedules((current) => current.filter((schedule) => schedule.id !== scheduleId));
   }
 
-  async function handleGoogleLogin() {
-    if (!isFirebaseConfigured()) {
-      setAuthMessage(".env에 Firebase 설정값을 넣으면 로그인할 수 있어요.");
+  async function handleGoogleDrive() {
+    if (!isGoogleDriveConfigured()) {
+      setAuthMessage(".env에 Google OAuth 클라이언트 ID를 넣어 주세요.");
       return;
     }
 
     try {
-      if (authUser) {
-        await signOutUser();
-        setAuthMessage("Google 로그인 준비됨");
+      if (isDriveConnected) {
+        await disconnectGoogleDrive();
+        setIsDriveConnected(false);
+        setAuthMessage("Google Drive 연결 준비됨");
         return;
       }
 
-      setAuthMessage("Google 로그인 중");
-      await signInWithGoogle();
+      setAuthMessage("Google Drive 연결 중");
+      const result = await connectGoogleDrive();
+      setIsDriveConnected(true);
+      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
+
+      if (result.restored) {
+        setAuthMessage("Drive 데이터를 불러왔습니다. 앱을 새로 여는 중입니다.");
+        window.location.reload();
+        return;
+      }
+
+      setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(result.updatedAt)}`);
     } catch {
-      setAuthMessage("로그인을 완료하지 못했어요.");
+      setAuthMessage("Google Drive 연결을 완료하지 못했습니다.");
+    }
+  }
+
+  async function handleDriveSync() {
+    if (!isDriveConnected) return;
+
+    try {
+      setAuthMessage("Google Drive 동기화 중");
+      const updatedAt = await syncToGoogleDrive();
+      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
+      setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(updatedAt)}`);
+    } catch {
+      setIsDriveConnected(false);
+      setAuthMessage("Drive 연결이 만료되었습니다. 다시 연결해 주세요.");
     }
   }
 
@@ -509,12 +427,10 @@ export function TodayView() {
       </nav>
 
       <PlanTab
-        tasks={todayTasks}
-        selectedDate={selectedDate}
-        language={appLanguage}
-        isActive={activeTab === "plan"}
-        cloudUserId={authUser?.uid ?? null}
-        onCloudMessage={setAuthMessage}
+          tasks={todayTasks}
+          selectedDate={selectedDate}
+          language={appLanguage}
+          isActive={activeTab === "plan"}
       />
 
       {activeTab === "tasks" && (
@@ -569,18 +485,24 @@ export function TodayView() {
             isActive={activeTab === "words"}
             language={appLanguage}
             dataResetToken={dataResetToken}
-            cloudUserId={authUser?.uid ?? null}
-            onCloudMessage={setAuthMessage}
           />
         </Suspense>
       )}
-      <PomodoroTab tasks={todayTasks} selectedDate={selectedDate} isActive={activeTab === "pomodoro"} language={appLanguage} />
-      <MemoTab isActive={activeTab === "memo"} language={appLanguage} cloudUserId={authUser?.uid ?? null} onCloudMessage={setAuthMessage} />
+      {hasOpenedPomodoro && (
+        <Suspense fallback={activeTab === "pomodoro" ? <LazyTabFallback language={appLanguage} /> : null}>
+          <PomodoroTab tasks={todayTasks} selectedDate={selectedDate} isActive={activeTab === "pomodoro"} language={appLanguage} />
+        </Suspense>
+      )}
+      {hasOpenedMemo && (
+        <Suspense fallback={activeTab === "memo" ? <LazyTabFallback language={appLanguage} /> : null}>
+          <MemoTab isActive={activeTab === "memo"} language={appLanguage} />
+        </Suspense>
+      )}
       {activeTab === "settings" && (
         <SettingsTab
           language={appLanguage}
           fontMode={fontMode}
-          authUser={authUser}
+          isDriveConnected={isDriveConnected}
           authMessage={authMessage}
           onLanguageChange={setAppLanguage}
           onFontModeChange={setFontMode}
@@ -588,16 +510,27 @@ export function TodayView() {
           onNotificationRequest={handleNotificationRequest}
           onBackup={() => backupAppData(tasks, schedules)}
           onDeleteData={() =>
-            void deleteAppData(authUser?.uid ?? null, () => {
+            void deleteAppData(() => {
               setTasks([]);
               setSchedules([]);
               setDataResetToken((current) => current + 1);
             })
           }
-          onGoogleLogin={handleGoogleLogin}
+          onGoogleDrive={handleGoogleDrive}
+          onDriveSync={handleDriveSync}
         />
       )}
     </main>
+  );
+}
+
+function LazyTabFallback({ language }: { language: AppLanguage }) {
+  return (
+    <section className={styles.mainPanel}>
+      <div className={styles.vocabDone}>
+        <strong>{language === "ko" ? "불러오는 중" : "Loading"}</strong>
+      </div>
+    </section>
   );
 }
 
@@ -628,7 +561,7 @@ type TasksTabProps = {
 function SettingsTab({
   language,
   fontMode,
-  authUser,
+  isDriveConnected,
   authMessage,
   onLanguageChange,
   onFontModeChange,
@@ -636,11 +569,12 @@ function SettingsTab({
   onNotificationRequest,
   onBackup,
   onDeleteData,
-  onGoogleLogin
+  onGoogleDrive,
+  onDriveSync
 }: {
   language: AppLanguage;
   fontMode: FontMode;
-  authUser: User | null;
+  isDriveConnected: boolean;
   authMessage: string;
   onLanguageChange: (language: AppLanguage) => void;
   onFontModeChange: (fontMode: FontMode) => void;
@@ -648,7 +582,8 @@ function SettingsTab({
   onNotificationRequest: () => void;
   onBackup: () => void;
   onDeleteData: () => void;
-  onGoogleLogin: () => void;
+  onGoogleDrive: () => void;
+  onDriveSync: () => void;
 }) {
   return (
     <section className={styles.mainPanel}>
@@ -725,17 +660,26 @@ function SettingsTab({
 
         <section className={styles.settingsGroup}>
           <div>
-            <h3>{language === "ko" ? "계정" : "Account"}</h3>
+            <h3>Google Drive</h3>
             <p>{getAuthMessageLabel(authMessage, language)}</p>
             <span className={styles.syncScope}>
               {language === "ko"
-                ? "동기화 대상: 할일, 설정, 계획표, 단어 기록, 메모"
-                : "Syncs: tasks, schedules, settings, planner, word progress, memos"}
+                ? "앱 전용 숨김 폴더에 저장되며 각 사용자의 Google Drive 용량을 사용합니다."
+                : "Data is stored in a private app folder using each user's own Google Drive storage."}
             </span>
           </div>
-          <button type="button" className={styles.settingsAction} onClick={onGoogleLogin}>
-            {authUser ? (language === "ko" ? "Google 로그아웃" : "Sign Out") : language === "ko" ? "Google 로그인" : "Sign In With Google"}
-          </button>
+          <div className={styles.settingsActionGroup}>
+            {isDriveConnected && (
+              <button type="button" className={styles.settingsAction} onClick={onDriveSync}>
+                {language === "ko" ? "지금 동기화" : "Sync Now"}
+              </button>
+            )}
+            <button type="button" className={styles.settingsAction} onClick={onGoogleDrive}>
+              {isDriveConnected
+                ? language === "ko" ? "Drive 연결 해제" : "Disconnect Drive"
+                : language === "ko" ? "내 Google Drive 연결" : "Connect My Google Drive"}
+            </button>
+          </div>
         </section>
 
         <section className={`${styles.settingsGroup} ${styles.helpGroup}`}>
@@ -775,16 +719,12 @@ function PlanTab({
   tasks,
   selectedDate,
   language,
-  isActive,
-  cloudUserId,
-  onCloudMessage
+  isActive
 }: {
   tasks: Task[];
   selectedDate: string;
   language: AppLanguage;
   isActive: boolean;
-  cloudUserId: string | null;
-  onCloudMessage: (message: string) => void;
 }) {
   const [planBlocks, setPlanBlocks] = useState<PlanBlock[]>(() => loadStoredPlanBlocks());
   const [isAddingRoutine, setIsAddingRoutine] = useState(false);
@@ -816,47 +756,8 @@ function PlanTab({
       ].sort((a, b) => a.startTime.localeCompare(b.startTime)),
     [planBlocks, timedTasks]
   );
-  const isApplyingRemotePlanBlocks = useRef(false);
-  const hasReceivedRemotePlanBlocks = useRef(false);
-
-  useEffect(() => {
-    if (!cloudUserId) {
-      hasReceivedRemotePlanBlocks.current = false;
-      return;
-    }
-
-    return subscribeUserAppData<PlanBlock[]>(
-      cloudUserId,
-      "planBlocks",
-      (remotePlanBlocks) => {
-        if (!remotePlanBlocks && !hasReceivedRemotePlanBlocks.current && planBlocks.length > 0) {
-          void saveUserAppData(cloudUserId, "planBlocks", planBlocks);
-          hasReceivedRemotePlanBlocks.current = true;
-          return;
-        }
-
-        hasReceivedRemotePlanBlocks.current = true;
-        if (!remotePlanBlocks) return;
-
-        isApplyingRemotePlanBlocks.current = true;
-        setPlanBlocks(remotePlanBlocks.filter(isPlanBlock));
-      },
-      () => onCloudMessage("동기화 오류: 계획표는 로컬에 저장 중")
-    );
-  }, [cloudUserId]);
-
   useEffect(() => {
     saveStoredPlanBlocks(planBlocks);
-    if (isApplyingRemotePlanBlocks.current) {
-      isApplyingRemotePlanBlocks.current = false;
-      return;
-    }
-
-    if (cloudUserId && hasReceivedRemotePlanBlocks.current) {
-      void saveUserAppData(cloudUserId, "planBlocks", planBlocks).catch(() => {
-        onCloudMessage("동기화 오류: 계획표는 로컬에 저장 중");
-      });
-    }
   }, [planBlocks]);
 
   function addPlanBlock(event: FormEvent<HTMLFormElement>) {
@@ -926,23 +827,27 @@ function PlanTab({
       )}
 
       <div className={styles.planTimeline}>
-        {timelineItems.map((item) => (
-          <article
-            key={item.id}
-            className={item.kind === "task" ? `${styles.planBlock} ${styles.taskPlanBlock}` : styles.planBlock}
-          >
-            <time>{item.endTime ? `${item.startTime} ~ ${item.endTime}` : item.startTime}</time>
-            <div>
-              <strong>{item.title}</strong>
-              <span>{item.kind === "task" ? (language === "ko" ? "할일" : "Task") : language === "ko" ? "생활 루틴" : "Life Routine"}</span>
-            </div>
-            {item.canDelete ? (
-              <button type="button" onClick={() => deletePlanBlock(item.id)}>{language === "ko" ? "삭제" : "Delete"}</button>
-            ) : (
-              <span className={styles.planReadOnly}>{language === "ko" ? "자동" : "Auto"}</span>
-            )}
-          </article>
-        ))}
+        {timelineItems.length > 0 ? (
+          timelineItems.map((item) => (
+            <article
+              key={item.id}
+              className={item.kind === "task" ? `${styles.planBlock} ${styles.taskPlanBlock}` : styles.planBlock}
+            >
+              <time>{item.endTime ? `${item.startTime} ~ ${item.endTime}` : item.startTime}</time>
+              <div>
+                <strong>{item.title}</strong>
+                <span>{item.kind === "task" ? (language === "ko" ? "할일" : "Task") : language === "ko" ? "생활 루틴" : "Life Routine"}</span>
+              </div>
+              {item.canDelete ? (
+                <button type="button" onClick={() => deletePlanBlock(item.id)}>{language === "ko" ? "삭제" : "Delete"}</button>
+              ) : (
+                <span className={styles.planReadOnly}>{language === "ko" ? "자동" : "Auto"}</span>
+              )}
+            </article>
+          ))
+        ) : (
+          <p className={styles.emptyState}>{language === "ko" ? "루틴을 추가하면 시간 순서로 표시됩니다." : "Add a routine to build your timeline."}</p>
+        )}
       </div>
 
       <section className={styles.untimedTaskPanel}>
@@ -1045,33 +950,37 @@ function TasksTab({
         )}
 
         <div className={styles.taskList}>
-          {todayTasks.map((task) => (
-            <div key={task.id} className={styles.taskStack}>
-              <TaskRow
-                task={task}
-                selectedDate={selectedDate}
-                language={language}
-                onEdit={(taskId) => {
-                  if (editingTask?.id === taskId) {
-                    onCloseEdit();
-                    return;
-                  }
-                  onEdit(taskId);
-                }}
-                onToggleDone={onToggleDone}
-                isEditing={editingTask?.id === task.id}
-              />
-              {editingTask?.id === task.id && !isSchedulerOwnedTask(task) && (
-                <TaskEditor
-                  task={editingTask}
+          {todayTasks.length > 0 ? (
+            todayTasks.map((task) => (
+              <div key={task.id} className={styles.taskStack}>
+                <TaskRow
+                  task={task}
                   selectedDate={selectedDate}
                   language={language}
-                  onSaveTask={onSaveTask}
-                  onDeleteTask={onDeleteTask}
+                  onEdit={(taskId) => {
+                    if (editingTask?.id === taskId) {
+                      onCloseEdit();
+                      return;
+                    }
+                    onEdit(taskId);
+                  }}
+                  onToggleDone={onToggleDone}
+                  isEditing={editingTask?.id === task.id}
                 />
-              )}
-            </div>
-          ))}
+                {editingTask?.id === task.id && !isSchedulerOwnedTask(task) && (
+                  <TaskEditor
+                    task={editingTask}
+                    selectedDate={selectedDate}
+                    language={language}
+                    onSaveTask={onSaveTask}
+                    onDeleteTask={onDeleteTask}
+                  />
+                )}
+              </div>
+            ))
+          ) : (
+            <p className={styles.emptyState}>{language === "ko" ? "등록된 할일이나 일정이 없습니다." : "No tasks or schedules for this day."}</p>
+          )}
         </div>
 
         <RepeatProgressDots tasks={todayTasks} selectedDate={selectedDate} language={language} />
@@ -2482,11 +2391,14 @@ function getNotificationStatusLabelEn(permission: ReminderPermission) {
 
 function getAuthMessageLabel(message: string, language: AppLanguage) {
   if (language === "ko") return message;
-  if (message === "Firebase 설정 필요") return "Firebase setup required.";
-  if (message === "Google 로그인 준비됨") return "Google sign-in ready.";
-  if (message.includes("Firebase 설정값")) return "Add Firebase values to .env to sign in.";
-  if (message.includes("동기화 오류")) return "Sync error: saving locally.";
-  if (message.endsWith("동기화 중")) return `${message.replace(" 동기화 중", "")} syncing`;
+  if (message === "Google Drive 설정 필요") return "Google Drive setup required.";
+  if (message === "Google Drive 연결 준비됨") return "Google Drive is ready to connect.";
+  if (message.includes("OAuth 클라이언트 ID")) return "Add your Google OAuth client ID to .env.";
+  if (message.includes("연결 중")) return "Connecting to Google Drive.";
+  if (message.includes("동기화 중")) return "Syncing with Google Drive.";
+  if (message.includes("동기화 완료")) return message.replace("Google Drive 동기화 완료", "Google Drive synced");
+  if (message.includes("연결이 만료")) return "The Drive connection expired. Please reconnect.";
+  if (message.includes("연결을 완료하지 못했습니다")) return "Could not connect to Google Drive.";
   return message;
 }
 
@@ -2635,10 +2547,18 @@ function CalendarTab({
               )}
               <span className={styles.calendarTextList}>
                 {daySchedules.slice(0, 3).map((schedule) => (
-                  <span key={schedule.id} className={schedule.kind === "deadline" ? styles.calendarDeadlineText : ""}>
+                  <span
+                    key={schedule.id}
+                    className={schedule.kind === "deadline" ? styles.calendarDeadlineText : ""}
+                    title={[
+                      schedule.time,
+                      schedule.title,
+                      schedule.kind === "deadline" ? formatDday(day, schedule.startDate) : ""
+                    ].filter(Boolean).join(" · ")}
+                  >
                     {schedule.time ? `${schedule.time} ` : ""}
-                    {schedule.kind === "deadline" ? `${formatDday(day, schedule.startDate)} ` : ""}
                     {schedule.title}
+                    {schedule.kind === "deadline" ? ` · ${formatDday(day, schedule.startDate)}` : ""}
                   </span>
                 ))}
                 {daySchedules.length > 3 && <span>+{daySchedules.length - 3}</span>}
@@ -2654,393 +2574,6 @@ function CalendarTab({
       </div>
     </section>
   );
-}
-
-
-function PomodoroTab({
-  tasks,
-  selectedDate,
-  isActive,
-  language
-}: {
-  tasks: Task[];
-  selectedDate: string;
-  isActive: boolean;
-  language: AppLanguage;
-}) {
-  const [focusMinutes, setFocusMinutes] = useState(25);
-  const [breakMinutes, setBreakMinutes] = useState(5);
-  const [targetSets, setTargetSets] = useState(4);
-  const [completedSets, setCompletedSets] = useState(0);
-  const [timerMode, setTimerMode] = useState<"idle" | "focus" | "break">("idle");
-  const [timerPreset, setTimerPreset] = useState<"focus" | "break">("focus");
-  const [remainingSeconds, setRemainingSeconds] = useState(focusMinutes * 60);
-  const [isRunning, setIsRunning] = useState(false);
-  const [focusTaskId, setFocusTaskId] = useState("");
-  const isEditingSettings = timerMode === "idle";
-  const isBreakTimer = timerMode === "break" || (timerMode === "idle" && timerPreset === "break");
-  const totalSeconds = isBreakTimer ? breakMinutes * 60 : focusMinutes * 60;
-  const progressRate = totalSeconds <= 0 ? 0 : 1 - remainingSeconds / totalSeconds;
-  const timerLabel = isBreakTimer ? (language === "ko" ? "휴식" : "Break") : language === "ko" ? "집중" : "Focus";
-  const focusCandidates = tasks.filter((task) => !isTaskDoneOnDate(task, selectedDate) && task.status !== "cancelled");
-
-  useEffect(() => {
-    if (isActive) return;
-    if (timerMode !== "focus") return;
-    setIsRunning(false);
-  }, [isActive, timerMode]);
-
-  useEffect(() => {
-    if (!isEditingSettings) return;
-    setRemainingSeconds(timerPreset === "break" ? breakMinutes * 60 : focusMinutes * 60);
-  }, [breakMinutes, focusMinutes, isEditingSettings, timerPreset]);
-
-  useEffect(() => {
-    if (!isRunning) return;
-
-    const timerId = window.setInterval(() => {
-      setRemainingSeconds((current) => {
-        if (current > 1) return current - 1;
-
-        setIsRunning(false);
-        if (timerMode === "focus") {
-          setCompletedSets((currentSet) => Math.min(targetSets, currentSet + 1));
-          window.setTimeout(() => window.alert(language === "ko" ? "집중 시간이 끝났어요." : "Focus time is over."), 0);
-        }
-        if (timerMode === "break") {
-          window.setTimeout(() => window.alert(language === "ko" ? "휴식 시간이 끝났어요." : "Break time is over."), 0);
-        }
-        setTimerMode("idle");
-        return 0;
-      });
-    }, 1000);
-
-    return () => window.clearInterval(timerId);
-  }, [breakMinutes, focusMinutes, isRunning, targetSets, timerMode]);
-
-  function updateFocusMinutes(value: number) {
-    setFocusMinutes(clampTimerValue(value, 1, 180));
-  }
-
-  function updateBreakMinutes(value: number) {
-    setBreakMinutes(clampTimerValue(value, 1, 60));
-  }
-
-  function updateTargetSets(value: number) {
-    setTargetSets(clampTimerValue(value, 1, 12));
-  }
-
-  function startFocus() {
-    setTimerPreset("focus");
-    setTimerMode("focus");
-    setRemainingSeconds(focusMinutes * 60);
-    setIsRunning(true);
-  }
-
-  function startBreak() {
-    setTimerPreset("break");
-    setTimerMode("break");
-    setRemainingSeconds(breakMinutes * 60);
-    setIsRunning(true);
-  }
-
-  function resetTimer() {
-    setTimerMode("idle");
-    setCompletedSets(0);
-    setRemainingSeconds(timerPreset === "break" ? breakMinutes * 60 : focusMinutes * 60);
-    setIsRunning(false);
-  }
-
-  function startSelectedPreset() {
-    if (remainingSeconds === 0) {
-      setRemainingSeconds(timerPreset === "break" ? breakMinutes * 60 : focusMinutes * 60);
-    }
-    if (timerPreset === "break") {
-      startBreak();
-      return;
-    }
-    startFocus();
-  }
-
-  return (
-    <section className={styles.mainPanel} hidden={!isActive}>
-      <h2>{language === "ko" ? "타이머" : "Timer"}</h2>
-      <div className={styles.pomodoroPanel}>
-        <div className={styles.pomoModes} aria-label={language === "ko" ? "타이머 모드" : "Timer mode"}>
-          <button
-            type="button"
-            className={!isBreakTimer ? styles.activePomoMode : ""}
-            onClick={() => {
-              if (!isEditingSettings) return;
-              setTimerPreset("focus");
-              setRemainingSeconds(focusMinutes * 60);
-            }}
-          >
-            {language === "ko" ? "집중" : "Focus"}
-          </button>
-          <button
-            type="button"
-            className={isBreakTimer ? styles.activePomoMode : ""}
-            onClick={() => {
-              if (!isEditingSettings) return;
-              setTimerPreset("break");
-              setRemainingSeconds(breakMinutes * 60);
-            }}
-          >
-            {language === "ko" ? "휴식" : "Break"}
-          </button>
-        </div>
-
-        <div className={styles.timerDisplay} aria-live="polite">
-          <div className={`${styles.timerCircle} ${isRunning && timerMode === "focus" ? styles.breathingTimer : ""}`}>
-            <PomoRing progress={progressRate} />
-            <div className={styles.timerCircleInner}>
-              <strong>{formatTimerSeconds(remainingSeconds)}</strong>
-              <span>{timerLabel}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className={styles.timerSettings}>
-          <label>
-            <span>{language === "ko" ? "집중" : "Focus"}</span>
-            <input
-              type="number"
-              min="1"
-              max="180"
-              value={focusMinutes}
-              disabled={!isEditingSettings}
-              onChange={(event) => updateFocusMinutes(Number(event.target.value))}
-            />
-            <em>{language === "ko" ? "분" : "min"}</em>
-          </label>
-          <label>
-            <span>{language === "ko" ? "휴식" : "Break"}</span>
-            <input
-              type="number"
-              min="1"
-              max="60"
-              value={breakMinutes}
-              disabled={!isEditingSettings}
-              onChange={(event) => updateBreakMinutes(Number(event.target.value))}
-            />
-            <em>{language === "ko" ? "분" : "min"}</em>
-          </label>
-          <label>
-            <span>{language === "ko" ? "반복" : "Sets"}</span>
-            <input
-              type="number"
-              min="1"
-              max="12"
-              value={targetSets}
-              disabled={!isEditingSettings}
-              onChange={(event) => updateTargetSets(Number(event.target.value))}
-            />
-            <em>{language === "ko" ? "회" : "sets"}</em>
-          </label>
-        </div>
-
-        <div className={styles.timerActions}>
-          {timerMode === "idle" && (
-            <>
-              <button type="button" onClick={startSelectedPreset}>{remainingSeconds === 0 ? (language === "ko" ? "다시 시작" : "Restart") : language === "ko" ? "시작" : "Start"}</button>
-              <button type="button" onClick={resetTimer}>{language === "ko" ? "리셋" : "Reset"}</button>
-            </>
-          )}
-          {timerMode === "focus" && (
-            <>
-              <button type="button" onClick={() => setIsRunning((current) => !current)}>{isRunning ? (language === "ko" ? "잠깐 멈춤" : "Pause") : language === "ko" ? "다시 시작" : "Resume"}</button>
-              <button type="button" onClick={resetTimer}>{language === "ko" ? "리셋" : "Reset"}</button>
-            </>
-          )}
-          {timerMode === "break" && (
-            <>
-              <button type="button" onClick={() => setIsRunning((current) => !current)}>{isRunning ? (language === "ko" ? "잠깐 멈춤" : "Pause") : language === "ko" ? "다시 시작" : "Resume"}</button>
-              <button type="button" onClick={resetTimer}>{language === "ko" ? "리셋" : "Reset"}</button>
-            </>
-          )}
-        </div>
-
-        <div className={styles.pomoDots}>
-          {Array.from({ length: Math.min(targetSets, 12) }).map((_, index) => (
-            <span key={index} className={index < completedSets ? styles.activePomoDot : ""} />
-          ))}
-          <strong>{language === "ko" ? `오늘 ${completedSets}회 집중` : `${completedSets} focus sessions today`}</strong>
-        </div>
-
-        <label className={styles.pomoFocus}>
-          <span>{language === "ko" ? "지금 집중할 일" : "Focus Task"}</span>
-          <select value={focusTaskId} onChange={(event) => setFocusTaskId(event.target.value)}>
-            <option value="">{language === "ko" ? "선택 안 함" : "No task selected"}</option>
-            {focusCandidates.map((task) => (
-              <option key={task.id} value={task.id}>
-                {task.title}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-    </section>
-  );
-}
-
-function MemoTab({
-  isActive,
-  language,
-  cloudUserId,
-  onCloudMessage
-}: {
-  isActive: boolean;
-  language: AppLanguage;
-  cloudUserId: string | null;
-  onCloudMessage: (message: string) => void;
-}) {
-  const [memos, setMemos] = useState<Memo[]>(() => loadStoredMemos());
-  const [content, setContent] = useState("");
-  const isApplyingRemoteMemos = useRef(false);
-  const hasReceivedRemoteMemos = useRef(false);
-
-  useEffect(() => {
-    if (!cloudUserId) {
-      hasReceivedRemoteMemos.current = false;
-      return;
-    }
-
-    return subscribeUserAppData<Memo[]>(
-      cloudUserId,
-      "memos",
-      (remoteMemos) => {
-        if (!remoteMemos && !hasReceivedRemoteMemos.current && memos.length > 0) {
-          void saveUserAppData(cloudUserId, "memos", memos);
-          hasReceivedRemoteMemos.current = true;
-          return;
-        }
-
-        hasReceivedRemoteMemos.current = true;
-        if (!remoteMemos) return;
-
-        isApplyingRemoteMemos.current = true;
-        setMemos(remoteMemos.filter(isMemo));
-      },
-      () => onCloudMessage("동기화 오류: 메모는 로컬에 저장 중")
-    );
-  }, [cloudUserId]);
-
-  useEffect(() => {
-    saveStoredMemos(memos);
-    if (isApplyingRemoteMemos.current) {
-      isApplyingRemoteMemos.current = false;
-      return;
-    }
-
-    if (cloudUserId && hasReceivedRemoteMemos.current) {
-      void saveUserAppData(cloudUserId, "memos", memos).catch(() => {
-        onCloudMessage("동기화 오류: 메모는 로컬에 저장 중");
-      });
-    }
-  }, [memos]);
-
-  function addMemo(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const trimmedContent = content.trim();
-    if (!trimmedContent) return;
-
-    setMemos((current) => [
-      {
-        id: `memo-${Date.now()}`,
-        content: trimmedContent,
-        createdAt: new Date().toISOString()
-      },
-      ...current
-    ]);
-    setContent("");
-  }
-
-  function deleteMemo(memoId: string) {
-    setMemos((current) => current.filter((memo) => memo.id !== memoId));
-  }
-
-  return (
-    <section className={styles.mainPanel} hidden={!isActive}>
-      <div className={styles.sectionHeader}>
-        <div>
-          <h2>{language === "ko" ? "메모" : "Memo"} <span className={styles.titleCount}>{memos.length}</span></h2>
-        </div>
-      </div>
-
-      <form className={styles.memoComposer} onSubmit={addMemo}>
-        <textarea
-          value={content}
-          maxLength={600}
-          placeholder={language === "ko" ? "예: 다음에 병원 예약할 때 필요한 서류 확인하기" : "e.g. Documents needed for the next appointment"}
-          onChange={(event) => setContent(event.target.value)}
-        />
-        <button type="submit">{language === "ko" ? "메모 추가" : "Add Memo"}</button>
-      </form>
-
-      <div className={styles.memoList}>
-        {memos.length > 0 ? (
-          memos.map((memo) => (
-            <article key={memo.id} className={styles.memoItem}>
-              <p>{memo.content}</p>
-              <div>
-                <time>{formatMemoTime(memo.createdAt)}</time>
-                <button type="button" onClick={() => deleteMemo(memo.id)}>{language === "ko" ? "삭제" : "Delete"}</button>
-              </div>
-            </article>
-          ))
-        ) : (
-          <p className={styles.emptyMemo}>{language === "ko" ? "아직 메모가 없어요." : "No memos yet."}</p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function PomoRing({ progress }: { progress: number }) {
-  const size = 300;
-  const stroke = 14;
-  const radius = (size - stroke) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference * (1 - Math.min(1, Math.max(0, progress)));
-
-  return (
-    <svg className={styles.pomoRing} width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
-      <circle
-        className={styles.pomoRingTrack}
-        cx={size / 2}
-        cy={size / 2}
-        r={radius}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={stroke}
-      />
-      <circle
-        className={styles.pomoRingProgress}
-        cx={size / 2}
-        cy={size / 2}
-        r={radius}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={stroke}
-        strokeLinecap="round"
-        strokeDasharray={circumference}
-        strokeDashoffset={dashOffset}
-      />
-    </svg>
-  );
-}
-
-function formatTimerSeconds(seconds: number) {
-  const safeSeconds = Math.max(0, seconds);
-  const minutes = Math.floor(safeSeconds / 60);
-  const restSeconds = safeSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(restSeconds).padStart(2, "0")}`;
-}
-
-function clampTimerValue(value: number, min: number, max: number) {
-  if (!Number.isFinite(value)) return min;
-  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 
@@ -3099,7 +2632,7 @@ function backupAppData(tasks: Task[], schedules: Schedule[]) {
   URL.revokeObjectURL(url);
 }
 
-async function deleteAppData(userId: string | null, onDeleted: () => void) {
+async function deleteAppData(onDeleted: () => void) {
   const confirmed = window.confirm("저장된 할일, 단어 기록, 메모, 계획표 루틴을 삭제할까요? 설정값은 유지됩니다.");
   if (!confirmed) return;
 
@@ -3109,18 +2642,19 @@ async function deleteAppData(userId: string | null, onDeleted: () => void) {
     window.localStorage.setItem(learnedWordsStorageKey, JSON.stringify([]));
     window.localStorage.setItem(memoStorageKey, JSON.stringify([]));
     window.localStorage.setItem(planBlocksStorageKey, JSON.stringify([]));
-    if (userId) {
-      await Promise.all([
-        saveUserTasks(userId, []),
-        saveUserAppData(userId, "schedules", []),
-        saveUserAppData(userId, "wordProgress", []),
-        saveUserAppData(userId, "memos", []),
-        saveUserAppData(userId, "planBlocks", [])
-      ]);
-    }
   } finally {
     onDeleted();
   }
+}
+
+function formatSyncTime(value: string) {
+  return new Date(value).toLocaleString("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
 }
 
 function readLocalStorageJson(key: string) {
@@ -3132,25 +2666,7 @@ function readLocalStorageJson(key: string) {
   }
 }
 
-function loadStoredMemos() {
-  try {
-    const rawValue = window.localStorage.getItem(memoStorageKey);
-    if (!rawValue) return [];
-    const parsed = JSON.parse(rawValue);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isMemo);
-  } catch {
-    return [];
-  }
-}
 
-function saveStoredMemos(memos: Memo[]) {
-  try {
-    window.localStorage.setItem(memoStorageKey, JSON.stringify(memos));
-  } catch {
-    // Memo persistence should never block the app shell.
-  }
-}
 
 function loadStoredPlanBlocks() {
   try {
@@ -3160,16 +2676,10 @@ function loadStoredPlanBlocks() {
       if (Array.isArray(parsed)) return parsed.filter(isPlanBlock);
     }
   } catch {
-    // Fall through to default plan blocks.
+    return [];
   }
 
-  return [
-    { id: "plan-default-01", title: "아침식사", startTime: "07:30", endTime: "08:00", kind: "life", taskId: null },
-    { id: "plan-default-02", title: "씻기 / 준비", startTime: "08:00", endTime: "08:30", kind: "life", taskId: null },
-    { id: "plan-default-03", title: "점심", startTime: "12:30", endTime: "13:00", kind: "life", taskId: null },
-    { id: "plan-default-04", title: "저녁식사", startTime: "18:30", endTime: "19:00", kind: "life", taskId: null },
-    { id: "plan-default-05", title: "정리하고 자기", startTime: "23:30", endTime: "23:59", kind: "life", taskId: null }
-  ] satisfies PlanBlock[];
+  return [];
 }
 
 function saveStoredPlanBlocks(blocks: PlanBlock[]) {
@@ -3191,20 +2701,3 @@ function isPlanBlock(value: unknown): value is PlanBlock {
     (block.kind === "life" || block.kind === "task")
   );
 }
-
-function isMemo(value: unknown): value is Memo {
-  if (!value || typeof value !== "object") return false;
-  const memo = value as Partial<Memo>;
-  return typeof memo.id === "string" && typeof memo.content === "string" && typeof memo.createdAt === "string";
-}
-
-function formatMemoTime(value: string) {
-  return new Date(value).toLocaleString("ko-KR", {
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  });
-}
-
