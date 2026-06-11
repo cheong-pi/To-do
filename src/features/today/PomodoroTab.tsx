@@ -27,8 +27,14 @@ type RunningTimerSession = {
   focusTaskId: string;
 };
 
+type DailyFocusRecord = {
+  date: string;
+  count: number;
+};
+
 const timerSettingsStorageKey = "dont-forget-timer-settings";
 const runningTimerStorageKey = "dont-forget-running-timer";
+const dailyFocusStorageKey = "dont-forget-daily-focus";
 const defaultTimerSettings: TimerSettings = {
   focusMinutes: 25,
   breakMinutes: 5,
@@ -42,6 +48,7 @@ export default function PomodoroTab({ tasks, selectedDate, isActive, language }:
   const [breakMinutes, setBreakMinutes] = useState(initialSettings.breakMinutes);
   const [targetSets, setTargetSets] = useState(initialSession?.targetSets ?? initialSettings.targetSets);
   const [completedSets, setCompletedSets] = useState(initialSession?.completedSets ?? 0);
+  const [dailyFocus, setDailyFocus] = useState(loadDailyFocusRecord);
   const [timerMode, setTimerMode] = useState<TimerMode>(initialSession?.mode ?? "idle");
   const [timerPreset, setTimerPreset] = useState<"focus" | "break">(initialSession?.mode ?? "focus");
   const [remainingSeconds, setRemainingSeconds] = useState(
@@ -57,6 +64,7 @@ export default function PomodoroTab({ tasks, selectedDate, isActive, language }:
     (timerMode === "idle" && timerPreset === "break");
   const totalSeconds = isBreakTimer ? breakMinutes * 60 : focusMinutes * 60;
   const progressRate = totalSeconds <= 0 ? 0 : 1 - remainingSeconds / totalSeconds;
+  const todayFocusCount = dailyFocus.date === getTimerDateKey() ? dailyFocus.count : 0;
   const timerLabel = isBreakTimer ? (language === "ko" ? "휴식" : "Break") : language === "ko" ? "집중" : "Focus";
   const focusCandidates = tasks.filter((task) => !isTaskDoneOnDate(task, selectedDate) && task.status !== "cancelled");
 
@@ -85,6 +93,10 @@ export default function PomodoroTab({ tasks, selectedDate, isActive, language }:
   }, [completedSets, focusTaskId, isRunning, sessionEndAt, targetSets, timerMode]);
 
   useEffect(() => {
+    saveDailyFocusRecord(dailyFocus);
+  }, [dailyFocus]);
+
+  useEffect(() => {
     if (!isEditingSettings) return;
     setRemainingSeconds(timerPreset === "break" ? breakMinutes * 60 : focusMinutes * 60);
   }, [breakMinutes, focusMinutes, isEditingSettings, timerPreset]);
@@ -101,8 +113,13 @@ export default function PomodoroTab({ tasks, selectedDate, isActive, language }:
         setSessionEndAt(null);
         clearRunningTimerSession();
         if (timerMode === "focus") {
+          const completionDate = getTimerDateKey();
           const nextCompletedSets = Math.min(targetSets, completedSets + 1);
           setCompletedSets(nextCompletedSets);
+          setDailyFocus((current) => ({
+            date: completionDate,
+            count: current.date === completionDate ? current.count + 1 : 1
+          }));
           setTimerMode(nextCompletedSets >= targetSets ? "setsComplete" : "focusComplete");
           showTimerNotification(
             language === "ko" ? "집중 시간이 끝났어요" : "Focus time is over",
@@ -154,6 +171,10 @@ export default function PomodoroTab({ tasks, selectedDate, isActive, language }:
 
   function startTimer(mode: "focus" | "break", seconds: number) {
     const duration = Math.max(1, seconds);
+    const currentDate = getTimerDateKey();
+    if (dailyFocus.date !== currentDate) {
+      setDailyFocus({ date: currentDate, count: 0 });
+    }
     setTimerMode(mode);
     setRemainingSeconds(duration);
     setSessionEndAt(Date.now() + duration * 1000);
@@ -280,7 +301,7 @@ export default function PomodoroTab({ tasks, selectedDate, isActive, language }:
           {Array.from({ length: Math.min(targetSets, 12) }).map((_, index) => (
             <span key={index} className={index < completedSets ? styles.activePomoDot : ""} />
           ))}
-          <strong>{language === "ko" ? `오늘 ${completedSets}회 집중` : `${completedSets} focus sessions today`}</strong>
+          <strong>{language === "ko" ? `오늘 ${todayFocusCount}회 집중` : `${todayFocusCount} focus sessions today`}</strong>
         </div>
 
         <label className={styles.pomoFocus}>
@@ -439,6 +460,34 @@ function clearRunningTimerSession() {
 
 function getRemainingSessionSeconds(endAt: number) {
   return Math.max(0, Math.ceil((endAt - Date.now()) / 1000));
+}
+
+function loadDailyFocusRecord(): DailyFocusRecord {
+  const today = getTimerDateKey();
+  try {
+    const rawValue = window.localStorage.getItem(dailyFocusStorageKey);
+    if (!rawValue) return { date: today, count: 0 };
+    const parsed = JSON.parse(rawValue) as Partial<DailyFocusRecord>;
+    if (parsed.date !== today || typeof parsed.count !== "number") return { date: today, count: 0 };
+    return { date: today, count: Math.max(0, Math.round(parsed.count)) };
+  } catch {
+    return { date: today, count: 0 };
+  }
+}
+
+function saveDailyFocusRecord(record: DailyFocusRecord) {
+  try {
+    window.localStorage.setItem(dailyFocusStorageKey, JSON.stringify(record));
+  } catch {
+    // Daily focus history should not interrupt the timer.
+  }
+}
+
+function getTimerDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function showTimerNotification(title: string, body: string) {

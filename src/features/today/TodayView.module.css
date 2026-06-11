@@ -489,6 +489,61 @@
   line-height: 1.45;
 }
 
+.driveConflictNotice {
+  display: block;
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-brand) 70%, var(--color-line));
+  border-radius: 10px;
+  background: var(--color-brand-softer);
+  color: var(--color-text);
+  font-size: 0.8rem;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.installChecklist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.installChecklist span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.installChecklist i {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  border-radius: 50%;
+  font-style: normal;
+  font-size: 0.62rem;
+  line-height: 1;
+}
+
+.installChecklist .readyItem i {
+  background: var(--color-brand);
+  color: var(--color-ink);
+}
+
+.installChecklist .pendingItem i {
+  background: var(--color-line-soft);
+  color: var(--color-subtle);
+}
+
 .segmentControl {
   display: inline-flex;
   gap: 6px;
@@ -518,6 +573,9 @@
 }
 
 .settingsAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 40px;
   border: 1px solid transparent;
   border-radius: var(--radius-pill);
@@ -527,6 +585,16 @@
   font-size: 0.86rem;
   font-weight: 900;
   padding: 0 16px;
+  white-space: nowrap;
+}
+
+.settingsFileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
@@ -548,6 +616,71 @@
   border-color: var(--color-danger-soft);
   background: var(--color-danger-soft);
   color: var(--color-danger);
+}
+
+.recordSummary {
+  display: grid;
+  gap: 9px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-line-soft);
+}
+
+.recordSummaryHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recordSummaryHeader strong {
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+  line-height: 1.1;
+}
+
+.recordSummaryHeader span {
+  color: var(--color-brand-strong);
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.recordBar {
+  height: 7px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--color-line-soft);
+}
+
+.recordBar i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand);
+}
+
+.recordGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.recordItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.recordItem strong {
+  color: var(--color-text);
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 .helpGroup {
@@ -2133,16 +2266,41 @@
   line-height: 1;
 }
 
+.calendarCellTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
 .calendarStats {
-  position: absolute;
-  top: 8px;
-  right: 9px;
-  min-width: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
   color: var(--color-brand-strong);
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 900;
   line-height: 1;
   text-align: right;
+}
+
+.calendarStats span:first-child {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand-soft);
+  color: var(--color-text);
+  font-size: 0.7rem;
+}
+
+.calendarStats span:last-child {
+  color: var(--color-muted);
+  font-size: 0.62rem;
 }
 
 .calendarTextList {
@@ -2178,6 +2336,263 @@
   height: 100%;
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--color-brand) 86%, #6f4d0b);
+}
+
+.calendarNoteDot {
+  width: 6px;
+  height: 6px;
+  margin: 2px auto 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-danger) 72%, var(--color-brand));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger) 16%, transparent);
+}
+
+.calendarSelectedList {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-line-soft);
+}
+
+.calendarSelectedHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.calendarSelectedHeader h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
+.calendarSelectedMeta {
+  display: block;
+  margin-top: 3px;
+  color: var(--color-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.calendarSelectedHeader button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.calendarSelectedList > div {
+  display: grid;
+  gap: 7px;
+}
+
+.calendarSelectedList article {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-surface) 82%, var(--color-page));
+}
+
+.calendarSelectedCheck {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 2px solid var(--color-line);
+  border-radius: 50%;
+  background: var(--color-surface);
+  color: transparent;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.calendarSelectedCheck:hover {
+  border-color: var(--color-brand-strong);
+}
+
+.calendarSelectedDone {
+  background: color-mix(in srgb, var(--color-brand) 14%, var(--color-surface));
+}
+
+.calendarSelectedDone .calendarSelectedCheck {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  color: var(--color-ink);
+}
+
+.calendarSelectedDone strong {
+  color: var(--color-muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+
+.calendarSelectedList article > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.calendarSelectedList strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendarSelectedList span,
+.calendarSelectedList p {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.calendarSelectedList p {
+  margin: 0;
+}
+
+.dailyNoteBox {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-line-soft);
+}
+
+.dailyNoteHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dailyNoteHeader > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.dailyNoteHeader button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.dailyNoteBox strong {
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 0.96rem;
+  line-height: 1.2;
+}
+
+.dailyNoteBox span {
+  color: var(--color-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.dailyNoteBox textarea {
+  width: 100%;
+  min-height: 82px;
+  resize: vertical;
+  padding: 11px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-surface) 88%, var(--color-page));
+  color: var(--color-text);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.dailyNoteBox textarea:focus {
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 28%, transparent);
+  outline: none;
+}
+
+.monthNoteList {
+  display: grid;
+  gap: 7px;
+  margin-top: 2px;
+}
+
+.monthNoteList > strong {
+  color: var(--color-muted);
+  font-family: var(--font-body);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.monthNoteList > div {
+  display: grid;
+  gap: 6px;
+}
+
+.monthNoteList button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 7px 9px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  text-align: left;
+}
+
+.monthNoteList button span {
+  color: var(--color-text);
+  font-size: 0.76rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.monthNoteList button em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 0.76rem;
+  font-style: normal;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monthNoteList .activeMonthNote {
+  border-color: var(--color-brand);
+  background: var(--color-brand-softer);
 }
 
 .calendarDots {
@@ -2405,7 +2820,77 @@
 
   .calendarCell {
     min-height: 72px;
-    padding: 7px;
+    gap: 4px;
+    padding: 5px 4px;
+  }
+
+  .calendarDay {
+    font-size: 0.78rem;
+  }
+
+  .calendarStats {
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    max-width: none;
+    margin-top: 0;
+    font-size: 0.58rem;
+    line-height: 1;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .calendarStats span:first-child {
+    min-width: 13px;
+    height: 13px;
+    font-size: 0.52rem;
+  }
+
+  .calendarStats span:last-child {
+    display: block;
+    font-size: 0.42rem;
+    font-weight: 800;
+  }
+
+  .calendarTextList {
+    display: none;
+  }
+
+  .calendarBar {
+    height: 4px;
+  }
+
+  .calendarSelectedHeader {
+    align-items: flex-start;
+  }
+
+  .calendarSelectedHeader h3 {
+    font-size: 0.9rem;
+  }
+
+  .calendarSelectedHeader button {
+    padding: 5px 8px;
+    font-size: 0.72rem;
+  }
+
+  .calendarSelectedList article {
+    align-items: flex-start;
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 3px;
+  }
+
+  .calendarSelectedList strong {
+    width: 100%;
+    white-space: normal;
+  }
+
+  .dailyNoteHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dailyNoteHeader button {
+    width: fit-content;
   }
 
 }

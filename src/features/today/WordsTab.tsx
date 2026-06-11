@@ -210,7 +210,7 @@ export default function WordsTab({ isActive, language, dataResetToken }: WordsTa
     <section className={styles.mainPanel} hidden={!isActive}>
       <div className={styles.sectionHeader}>
         <div>
-          <h2>{language === "ko" ? "단어 외우기" : "Vocabulary"}</h2>
+          <h2>{language === "ko" ? "단어 학습" : "Word Study"}</h2>
         </div>
         <label className={styles.wordCountControl}>
           <span>{language === "ko" ? "오늘" : "Today"}</span>
@@ -228,7 +228,7 @@ export default function WordsTab({ isActive, language, dataResetToken }: WordsTa
 
       {!wordBank ? (
         <div className={styles.vocabDone}>
-          <strong>{language === "ko" ? "단어장 불러오는 중" : "Loading Vocabulary"}</strong>
+          <strong>{language === "ko" ? "단어장 불러오는 중" : "Loading Word Study"}</strong>
         </div>
       ) : !isFinished && currentWord ? (
         <div className={styles.flashWrap}>

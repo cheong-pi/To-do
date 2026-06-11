@@ -2,6 +2,7 @@ const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const DRIVE_FILE_NAME = "dont-forget-data.json";
 const LAST_SYNC_KEY = "dont-forget-drive-last-sync";
 const SESSION_TOKEN_KEY = "dont-forget-drive-token";
+const RECOVERY_BACKUP_KEY = "dont-forget-drive-recovery";
 
 export const appDataStorageKeys = [
   "dont-forget.tasks.v1",
@@ -10,7 +11,9 @@ export const appDataStorageKeys = [
   "dont-forget-plan-blocks",
   "dont-forget-memos",
   "dont-forget-learned-words",
-  "dont-forget-timer-settings"
+  "dont-forget-timer-settings",
+  "dont-forget-daily-focus",
+  "dont-forget-daily-notes"
 ] as const;
 
 type TokenResponse = {
@@ -35,6 +38,11 @@ export type DriveBackup = {
   data: Record<string, string | null>;
 };
 
+type DriveRecoveryBackup = {
+  createdAt: string;
+  backup: DriveBackup;
+};
+
 declare global {
   interface Window {
     google?: {
@@ -54,6 +62,7 @@ declare global {
 
 let accessToken: string | null = sessionStorage.getItem(SESSION_TOKEN_KEY);
 let driveFileId: string | null = null;
+let pendingRemoteBackup: DriveBackup | null = null;
 
 export function isGoogleDriveConfigured() {
   return Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID);
@@ -91,21 +100,46 @@ export async function connectGoogleDrive() {
   const remoteBackup = await downloadDriveBackup();
 
   if (remoteBackup) {
-    applyDriveBackup(remoteBackup);
-    localStorage.setItem(LAST_SYNC_KEY, remoteBackup.updatedAt);
-    return { restored: true, updatedAt: remoteBackup.updatedAt };
+    const localBackup = createDriveBackup();
+    if (JSON.stringify(remoteBackup.data) === JSON.stringify(localBackup.data)) {
+      localStorage.setItem(LAST_SYNC_KEY, remoteBackup.updatedAt);
+      return { status: "synced" as const, updatedAt: remoteBackup.updatedAt };
+    }
+
+    saveDriveRecoveryBackup();
+    pendingRemoteBackup = remoteBackup;
+    return { status: "conflict" as const, updatedAt: remoteBackup.updatedAt };
   }
 
   const backup = createDriveBackup();
   await uploadDriveBackup(backup);
   localStorage.setItem(LAST_SYNC_KEY, backup.updatedAt);
-  return { restored: false, updatedAt: backup.updatedAt };
+  return { status: "synced" as const, updatedAt: backup.updatedAt };
+}
+
+export async function resolveDriveConflict(choice: "remote" | "local") {
+  if (!accessToken || !pendingRemoteBackup) throw new Error("GOOGLE_DRIVE_CONFLICT_NOT_FOUND");
+
+  if (choice === "remote") {
+    const updatedAt = pendingRemoteBackup.updatedAt;
+    applyDriveBackup(pendingRemoteBackup);
+    localStorage.setItem(LAST_SYNC_KEY, updatedAt);
+    pendingRemoteBackup = null;
+    return updatedAt;
+  }
+
+  const backup = createDriveBackup();
+  await uploadDriveBackup(backup);
+  localStorage.setItem(LAST_SYNC_KEY, backup.updatedAt);
+  pendingRemoteBackup = null;
+  return backup.updatedAt;
 }
 
 export async function disconnectGoogleDrive() {
   const token = accessToken;
   accessToken = null;
   driveFileId = null;
+  pendingRemoteBackup = null;
   sessionStorage.removeItem(SESSION_TOKEN_KEY);
   if (!token || !window.google) return;
 
@@ -126,12 +160,60 @@ export function getLastDriveSync() {
   return localStorage.getItem(LAST_SYNC_KEY);
 }
 
+export function getDriveRecoveryCreatedAt() {
+  return readDriveRecoveryBackup()?.createdAt ?? null;
+}
+
+export function restoreDriveRecoveryBackup() {
+  const recovery = readDriveRecoveryBackup();
+  if (!recovery) return false;
+  applyDriveBackup(recovery.backup);
+  localStorage.removeItem(RECOVERY_BACKUP_KEY);
+  return true;
+}
+
+export function clearDriveRecoveryBackup() {
+  localStorage.removeItem(RECOVERY_BACKUP_KEY);
+}
+
 export function createDriveBackup(): DriveBackup {
   return {
     version: 1,
     updatedAt: new Date().toISOString(),
     data: Object.fromEntries(appDataStorageKeys.map((key) => [key, localStorage.getItem(key)]))
   };
+}
+
+function saveDriveRecoveryBackup() {
+  const recovery: DriveRecoveryBackup = {
+    createdAt: new Date().toISOString(),
+    backup: createDriveBackup()
+  };
+  localStorage.setItem(RECOVERY_BACKUP_KEY, JSON.stringify(recovery));
+}
+
+function readDriveRecoveryBackup(): DriveRecoveryBackup | null {
+  const rawValue = localStorage.getItem(RECOVERY_BACKUP_KEY);
+  if (!rawValue) return null;
+
+  try {
+    const recovery = JSON.parse(rawValue) as Partial<DriveRecoveryBackup>;
+    if (
+      typeof recovery.createdAt !== "string" ||
+      !recovery.backup ||
+      recovery.backup.version !== 1 ||
+      typeof recovery.backup.updatedAt !== "string" ||
+      !recovery.backup.data ||
+      typeof recovery.backup.data !== "object"
+    ) {
+      localStorage.removeItem(RECOVERY_BACKUP_KEY);
+      return null;
+    }
+    return recovery as DriveRecoveryBackup;
+  } catch {
+    localStorage.removeItem(RECOVERY_BACKUP_KEY);
+    return null;
+  }
 }
 
 function applyDriveBackup(backup: DriveBackup) {

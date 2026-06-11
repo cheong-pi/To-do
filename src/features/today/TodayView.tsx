@@ -3,13 +3,17 @@ import { sortTodayTasks } from "./todayRules";
 import styles from "./TodayView.module.css";
 import { loadStoredSchedules, saveStoredSchedules } from "../../services/scheduleStorage";
 import { loadStoredTasks, saveStoredTasks } from "../../services/taskStorage";
+import { getLocalRecovery, restoreLocalRecovery, saveLocalRecovery } from "../../services/dataRecovery";
 import {
   connectGoogleDrive,
   createDriveBackup,
   disconnectGoogleDrive,
+  getDriveRecoveryCreatedAt,
   getLastDriveSync,
   isGoogleDriveConfigured,
   isGoogleDriveConnected,
+  resolveDriveConflict,
+  restoreDriveRecoveryBackup,
   syncToGoogleDrive
 } from "../../services/googleDriveSync";
 import type { RepeatKind, Schedule, Task, TaskKindOption, TaskOwner, TaskSource, TaskStatus, TodaySortGroup } from "../../types/task";
@@ -21,6 +25,43 @@ type AppLanguage = "ko" | "en";
 type FontMode = "default" | "system";
 
 type ReminderPermission = NotificationPermission | "unsupported";
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+};
+
+type InstallState = "available" | "installed" | "unavailable";
+
+type InstallReadiness = {
+  secureContext: boolean;
+  manifest: boolean;
+  icons: boolean;
+  serviceWorker: boolean;
+};
+
+type DailyNote = {
+  date: string;
+  text: string;
+  updatedAt: string;
+};
+
+type AppBackupPayload = {
+  app: "잊지 마";
+  version: 1;
+  exportedAt: string;
+  tasks: Task[];
+  schedules: Schedule[];
+  localStorage?: {
+    settings?: unknown;
+    wordProgress?: unknown;
+    memos?: unknown;
+    planBlocks?: unknown;
+    timerSettings?: unknown;
+    dailyFocus?: unknown;
+    dailyNotes?: unknown;
+  };
+};
 
 const WordsTab = lazy(() => import("./WordsTab"));
 const PomodoroTab = lazy(() => import("./PomodoroTab"));
@@ -45,7 +86,7 @@ const tabLabels: Record<AppLanguage, Record<AppTab, string>> = {
     plan: "계획표",
     tasks: "할일",
     calendar: "달력",
-    words: "단어 외우기",
+    words: "단어 학습",
     pomodoro: "타이머",
     memo: "메모",
     settings: "설정"
@@ -54,7 +95,7 @@ const tabLabels: Record<AppLanguage, Record<AppTab, string>> = {
     plan: "Planner",
     tasks: "Tasks",
     calendar: "Calendar",
-    words: "Vocabulary",
+    words: "Word Study",
     pomodoro: "Timer",
     memo: "Memo",
     settings: "Settings"
@@ -70,6 +111,21 @@ const tabs: AppTab[] = [
   "memo",
   "settings"
 ];
+
+const viewParamToTab: Record<string, AppTab> = {
+  plan: "plan",
+  tasks: "tasks",
+  today: "tasks",
+  calendar: "calendar",
+  words: "words",
+  vocabulary: "words",
+  pomodoro: "pomodoro",
+  timer: "pomodoro",
+  memo: "memo",
+  records: "calendar",
+  stats: "calendar",
+  settings: "settings"
+};
 
 const kindOptions: Array<{ id: TaskKindOption; label: Record<AppLanguage, string>; description: Record<AppLanguage, string> }> = [
   { id: "no_deadline", label: { ko: "기한 없음", en: "No Deadline" }, description: { ko: "날짜 없이 보관", en: "Keep without a date" } },
@@ -103,9 +159,12 @@ const learnedWordsStorageKey = "dont-forget-learned-words";
 const memoStorageKey = "dont-forget-memos";
 const planBlocksStorageKey = "dont-forget-plan-blocks";
 const appSettingsStorageKey = "dont-forget-app-settings";
+const timerSettingsStorageKey = "dont-forget-timer-settings";
+const dailyFocusStorageKey = "dont-forget-daily-focus";
+const dailyNotesStorageKey = "dont-forget-daily-notes";
 
 export function TodayView() {
-  const [activeTab, setActiveTab] = useState<AppTab>("plan");
+  const [activeTab, setActiveTab] = useState<AppTab>(() => getInitialAppTab());
   const [appLanguage, setAppLanguage] = useState<AppLanguage>(() => loadAppSettings().language);
   const [fontMode, setFontMode] = useState<FontMode>(() => loadAppSettings().fontMode);
   const [notificationPermission, setNotificationPermission] = useState<ReminderPermission>(() => getNotificationPermission());
@@ -119,10 +178,17 @@ export function TodayView() {
   const [schedules, setSchedules] = useState<Schedule[]>(() =>
     mergeSchedules(loadStoredSchedules(), migrateScheduleTasks(initialTasks))
   );
+  const [dailyNotes, setDailyNotes] = useState<DailyNote[]>(() => loadStoredDailyNotes());
   const [selectedDate, setSelectedDate] = useState(() => getLocalDateKey());
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [activeCreatePanel, setActiveCreatePanel] = useState<"task" | "schedule" | null>(null);
   const [isDriveConnected, setIsDriveConnected] = useState(() => isGoogleDriveConnected());
+  const [driveRecoveryCreatedAt, setDriveRecoveryCreatedAt] = useState(() => getDriveRecoveryCreatedAt());
+  const [localRecoveryCreatedAt, setLocalRecoveryCreatedAt] = useState(() => getLocalRecovery()?.createdAt ?? null);
+  const [driveConflictAt, setDriveConflictAt] = useState<string | null>(null);
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [installState, setInstallState] = useState<InstallState>(() => getInitialInstallState());
+  const [installReadiness, setInstallReadiness] = useState<InstallReadiness | null>(null);
   const [authMessage, setAuthMessage] = useState(
     isGoogleDriveConfigured()
       ? getLastDriveSync()
@@ -156,9 +222,49 @@ export function TodayView() {
   }, []);
 
   useEffect(() => {
+    const handleBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+      setInstallState("available");
+    };
+    const handleAppInstalled = () => {
+      setInstallPrompt(null);
+      setInstallState("installed");
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", handleAppInstalled);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    checkInstallReadiness().then((readiness) => {
+      if (!cancelled) setInstallReadiness(readiness);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [installState]);
+
+  useEffect(() => {
     if (activeTab === "words") setHasOpenedWords(true);
     if (activeTab === "pomodoro") setHasOpenedPomodoro(true);
     if (activeTab === "memo") setHasOpenedMemo(true);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const view = getTabViewParam(activeTab);
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("view") === view) return;
+    url.searchParams.set("view", view);
+    window.history.replaceState(null, "", `${url.pathname}?${url.searchParams.toString()}${url.hash}`);
   }, [activeTab]);
 
   useEffect(() => {
@@ -168,6 +274,10 @@ export function TodayView() {
   useEffect(() => {
     saveStoredSchedules(schedules);
   }, [schedules]);
+
+  useEffect(() => {
+    saveStoredDailyNotes(dailyNotes);
+  }, [dailyNotes]);
 
   useEffect(() => {
     if (!isDriveConnected) return;
@@ -212,6 +322,7 @@ export function TodayView() {
   }
 
   function toggleTaskDone(task: Task, date: string) {
+    const actionAt = new Date().toISOString();
     if (task.owner === "schedule" && task.scheduleId) {
       setSchedules((current) =>
         current.map((schedule) =>
@@ -244,7 +355,8 @@ export function TodayView() {
         ...task,
         status: "planned",
         progressPercent: 0,
-        remainingPercent: 100
+        remainingPercent: 100,
+        completedAt: null
       });
       return;
     }
@@ -253,7 +365,10 @@ export function TodayView() {
       ...task,
       status: "done",
       progressPercent: 100,
-      remainingPercent: 0
+      remainingPercent: 0,
+      completedAt: actionAt,
+      postponedAt: null,
+      cancelledAt: null
     });
     setEditingTaskId(null);
   }
@@ -298,7 +413,8 @@ export function TodayView() {
       ...task,
       status: "postponed",
       postponeCount: task.postponeCount + 1,
-      reminderAt: nextReminderAt
+      reminderAt: nextReminderAt,
+      postponedAt: new Date().toISOString()
     });
     setNowTick(Date.now());
   }
@@ -322,7 +438,8 @@ export function TodayView() {
     updateTask({
       ...task,
       status: "cancelled",
-      reminderAt: null
+      reminderAt: null,
+      cancelledAt: new Date().toISOString()
     });
   }
 
@@ -349,6 +466,15 @@ export function TodayView() {
     setSchedules((current) => current.filter((schedule) => schedule.id !== scheduleId));
   }
 
+  function saveDailyNote(date: string, text: string) {
+    setDailyNotes((current) => {
+      if (!text.trim()) return current.filter((note) => note.date !== date);
+      const nextNote: DailyNote = { date, text, updatedAt: new Date().toISOString() };
+      const exists = current.some((note) => note.date === date);
+      return exists ? current.map((note) => (note.date === date ? nextNote : note)) : [...current, nextNote];
+    });
+  }
+
   async function handleGoogleDrive() {
     if (!isGoogleDriveConfigured()) {
       setAuthMessage(".env에 Google OAuth 클라이언트 ID를 넣어 주세요.");
@@ -365,15 +491,18 @@ export function TodayView() {
 
       setAuthMessage("Google Drive 연결 중");
       const result = await connectGoogleDrive();
-      setIsDriveConnected(true);
-      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
+      setDriveRecoveryCreatedAt(getDriveRecoveryCreatedAt());
 
-      if (result.restored) {
-        setAuthMessage("Drive 데이터를 불러왔습니다. 앱을 새로 여는 중입니다.");
-        window.location.reload();
+      if (result.status === "conflict") {
+        setDriveConflictAt(result.updatedAt);
+        setIsDriveConnected(false);
+        setAuthMessage("Drive 데이터와 현재 데이터가 다릅니다. 사용할 데이터를 선택해 주세요.");
         return;
       }
 
+      setDriveConflictAt(null);
+      setIsDriveConnected(true);
+      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
       setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(result.updatedAt)}`);
     } catch {
       setAuthMessage("Google Drive 연결을 완료하지 못했습니다.");
@@ -394,6 +523,61 @@ export function TodayView() {
     }
   }
 
+  async function handleDriveConflict(choice: "remote" | "local") {
+    try {
+      setAuthMessage(choice === "remote" ? "Drive 데이터를 불러오는 중" : "현재 데이터를 Drive에 저장하는 중");
+      const updatedAt = await resolveDriveConflict(choice);
+      setDriveConflictAt(null);
+      setIsDriveConnected(true);
+
+      if (choice === "remote") {
+        setAuthMessage("Drive 데이터를 불러왔습니다. 앱을 새로 여는 중입니다.");
+        window.location.reload();
+        return;
+      }
+
+      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
+      setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(updatedAt)}`);
+    } catch {
+      setIsDriveConnected(false);
+      setAuthMessage("Drive 충돌을 해결하지 못했습니다. 다시 연결해 주세요.");
+    }
+  }
+
+  function handleDriveRecovery() {
+    if (!driveRecoveryCreatedAt) return;
+    const confirmed = window.confirm(
+      appLanguage === "ko"
+        ? `${formatBackupDate(driveRecoveryCreatedAt)}의 Drive 연결 전 데이터로 되돌릴까요?\n현재 로컬 데이터는 교체됩니다.`
+        : `Restore the local data saved before Drive connection on ${formatBackupDate(driveRecoveryCreatedAt)}?\nCurrent local data will be replaced.`
+    );
+    if (!confirmed) return;
+
+    if (!restoreDriveRecoveryBackup()) {
+      setDriveRecoveryCreatedAt(null);
+      setAuthMessage(appLanguage === "ko" ? "복구할 Drive 이전 데이터가 없습니다." : "No pre-Drive recovery data is available.");
+      return;
+    }
+
+    window.location.reload();
+  }
+
+  function handleLocalRecovery() {
+    if (!localRecoveryCreatedAt) return;
+    const confirmed = window.confirm(
+      appLanguage === "ko"
+        ? `${formatBackupDate(localRecoveryCreatedAt)}의 자동 복구본으로 되돌릴까요?\n현재 데이터는 복구본으로 교체됩니다.`
+        : `Restore the automatic recovery point from ${formatBackupDate(localRecoveryCreatedAt)}?\nCurrent data will be replaced.`
+    );
+    if (!confirmed) return;
+
+    if (!restoreLocalRecovery()) {
+      setLocalRecoveryCreatedAt(null);
+      return;
+    }
+    window.location.reload();
+  }
+
   async function handleNotificationRequest() {
     if (!("Notification" in window)) {
       setNotificationPermission("unsupported");
@@ -402,6 +586,15 @@ export function TodayView() {
 
     const nextPermission = await Notification.requestPermission();
     setNotificationPermission(nextPermission);
+  }
+
+  async function handleInstallApp() {
+    if (!installPrompt) return;
+
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    setInstallPrompt(null);
+    setInstallState(choice.outcome === "accepted" ? "installed" : "unavailable");
   }
 
   return (
@@ -463,9 +656,12 @@ export function TodayView() {
         <CalendarTab
           tasks={tasks}
           schedules={schedules}
+          dailyNotes={dailyNotes}
           selectedDate={selectedDate}
           language={appLanguage}
           onDateChange={setSelectedDate}
+          onToggleDone={toggleTaskDone}
+          onSaveDailyNote={saveDailyNote}
           onOpenTasks={() => setActiveTab("tasks")}
         />
       )}
@@ -475,7 +671,7 @@ export function TodayView() {
             activeTab === "words" ? (
               <section className={styles.mainPanel}>
                 <div className={styles.vocabDone}>
-                  <strong>{appLanguage === "ko" ? "단어장 불러오는 중" : "Loading Vocabulary"}</strong>
+                  <strong>{appLanguage === "ko" ? "단어장 불러오는 중" : "Loading Word Study"}</strong>
                 </div>
               </section>
             ) : null
@@ -503,14 +699,21 @@ export function TodayView() {
           language={appLanguage}
           fontMode={fontMode}
           isDriveConnected={isDriveConnected}
+          driveRecoveryCreatedAt={driveRecoveryCreatedAt}
+          localRecoveryCreatedAt={localRecoveryCreatedAt}
+          driveConflictAt={driveConflictAt}
           authMessage={authMessage}
           onLanguageChange={setAppLanguage}
           onFontModeChange={setFontMode}
           notificationPermission={notificationPermission}
           onNotificationRequest={handleNotificationRequest}
           onBackup={() => backupAppData(tasks, schedules)}
+          onRestore={(file) =>
+            void restoreAppData(file, appLanguage, (createdAt) => setLocalRecoveryCreatedAt(createdAt))
+          }
           onDeleteData={() =>
-            void deleteAppData(() => {
+            void deleteAppData(appLanguage, (createdAt) => {
+              setLocalRecoveryCreatedAt(createdAt);
               setTasks([]);
               setSchedules([]);
               setDataResetToken((current) => current + 1);
@@ -518,6 +721,12 @@ export function TodayView() {
           }
           onGoogleDrive={handleGoogleDrive}
           onDriveSync={handleDriveSync}
+          onDriveRecovery={handleDriveRecovery}
+          onLocalRecovery={handleLocalRecovery}
+          onDriveConflict={handleDriveConflict}
+          installState={installState}
+          installReadiness={installReadiness}
+          onInstallApp={handleInstallApp}
         />
       )}
     </main>
@@ -558,32 +767,61 @@ type TasksTabProps = {
   onDeleteSchedule: (scheduleId: string) => void;
 };
 
+function RecordItem({ label, value }: { label: string; value: string }) {
+  return (
+    <span className={styles.recordItem}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </span>
+  );
+}
+
 function SettingsTab({
   language,
   fontMode,
   isDriveConnected,
+  driveRecoveryCreatedAt,
+  localRecoveryCreatedAt,
+  driveConflictAt,
   authMessage,
   onLanguageChange,
   onFontModeChange,
   notificationPermission,
   onNotificationRequest,
   onBackup,
+  onRestore,
   onDeleteData,
   onGoogleDrive,
-  onDriveSync
+  onDriveSync,
+  onDriveRecovery,
+  onLocalRecovery,
+  onDriveConflict,
+  installState,
+  installReadiness,
+  onInstallApp
 }: {
   language: AppLanguage;
   fontMode: FontMode;
   isDriveConnected: boolean;
+  driveRecoveryCreatedAt: string | null;
+  localRecoveryCreatedAt: string | null;
+  driveConflictAt: string | null;
   authMessage: string;
   onLanguageChange: (language: AppLanguage) => void;
   onFontModeChange: (fontMode: FontMode) => void;
   notificationPermission: ReminderPermission;
   onNotificationRequest: () => void;
   onBackup: () => void;
+  onRestore: (file: File) => void;
   onDeleteData: () => void;
   onGoogleDrive: () => void;
   onDriveSync: () => void;
+  onDriveRecovery: () => void;
+  onLocalRecovery: () => void;
+  onDriveConflict: (choice: "remote" | "local") => void;
+  installState: InstallState;
+  installReadiness: InstallReadiness | null;
+  onInstallApp: () => void;
 }) {
   return (
     <section className={styles.mainPanel}>
@@ -633,9 +871,29 @@ function SettingsTab({
             <button type="button" className={styles.settingsAction} onClick={onBackup}>
               {language === "ko" ? "데이터 백업하기" : "Back Up Data"}
             </button>
+            <label className={styles.settingsAction}>
+              {language === "ko" ? "백업 복원하기" : "Restore Backup"}
+              <input
+                className={styles.settingsFileInput}
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) onRestore(file);
+                  event.target.value = "";
+                }}
+              />
+            </label>
             <button type="button" className={`${styles.settingsAction} ${styles.dangerAction}`} onClick={onDeleteData}>
               {language === "ko" ? "데이터 삭제하기" : "Delete Data"}
             </button>
+            {localRecoveryCreatedAt && (
+              <button type="button" className={styles.settingsAction} onClick={onLocalRecovery}>
+                {language === "ko"
+                  ? `자동 복구 · ${formatBackupDate(localRecoveryCreatedAt)}`
+                  : `Automatic Recovery · ${formatBackupDate(localRecoveryCreatedAt)}`}
+              </button>
+            )}
           </div>
         </section>
 
@@ -660,6 +918,23 @@ function SettingsTab({
 
         <section className={styles.settingsGroup}>
           <div>
+            <h3>{language === "ko" ? "앱 설치" : "Install App"}</h3>
+            <p>{getInstallStatusLabel(installState, language)}</p>
+            <InstallReadinessList readiness={installReadiness} installState={installState} language={language} />
+            <span className={styles.syncScope}>{getInstallHintLabel(installState, language)}</span>
+          </div>
+          <button
+            type="button"
+            className={styles.settingsAction}
+            onClick={onInstallApp}
+            disabled={installState !== "available"}
+          >
+            {getInstallActionLabel(installState, language)}
+          </button>
+        </section>
+
+        <section className={styles.settingsGroup}>
+          <div>
             <h3>Google Drive</h3>
             <p>{getAuthMessageLabel(authMessage, language)}</p>
             <span className={styles.syncScope}>
@@ -667,14 +942,43 @@ function SettingsTab({
                 ? "앱 전용 숨김 폴더에 저장되며 각 사용자의 Google Drive 용량을 사용합니다."
                 : "Data is stored in a private app folder using each user's own Google Drive storage."}
             </span>
+            {driveRecoveryCreatedAt && (
+              <span className={styles.syncScope}>
+                {language === "ko"
+                  ? `Drive 연결 전 복구본 · ${formatBackupDate(driveRecoveryCreatedAt)}`
+                  : `Pre-Drive recovery · ${formatBackupDate(driveRecoveryCreatedAt)}`}
+              </span>
+            )}
+            {driveConflictAt && (
+              <span className={styles.driveConflictNotice}>
+                {language === "ko"
+                  ? `Drive 백업 ${formatBackupDate(driveConflictAt)} · 어느 데이터를 유지할지 선택하세요.`
+                  : `Drive backup ${formatBackupDate(driveConflictAt)} · Choose which data to keep.`}
+              </span>
+            )}
           </div>
           <div className={styles.settingsActionGroup}>
+            {driveConflictAt && (
+              <>
+                <button type="button" className={styles.settingsAction} onClick={() => onDriveConflict("remote")}>
+                  {language === "ko" ? "Drive 데이터 사용" : "Use Drive Data"}
+                </button>
+                <button type="button" className={styles.settingsAction} onClick={() => onDriveConflict("local")}>
+                  {language === "ko" ? "현재 데이터 유지" : "Keep Current Data"}
+                </button>
+              </>
+            )}
+            {driveRecoveryCreatedAt && (
+              <button type="button" className={styles.settingsAction} onClick={onDriveRecovery}>
+                {language === "ko" ? "연결 전 데이터로 복구" : "Restore Pre-Drive Data"}
+              </button>
+            )}
             {isDriveConnected && (
               <button type="button" className={styles.settingsAction} onClick={onDriveSync}>
                 {language === "ko" ? "지금 동기화" : "Sync Now"}
               </button>
             )}
-            <button type="button" className={styles.settingsAction} onClick={onGoogleDrive}>
+            <button type="button" className={styles.settingsAction} onClick={onGoogleDrive} disabled={Boolean(driveConflictAt)}>
               {isDriveConnected
                 ? language === "ko" ? "Drive 연결 해제" : "Disconnect Drive"
                 : language === "ko" ? "내 Google Drive 연결" : "Connect My Google Drive"}
@@ -687,13 +991,13 @@ function SettingsTab({
             <h3>{language === "ko" ? "도움말" : "Help"}</h3>
             {language === "ko" ? (
               <ul>
-                <li>잊지 마는 생활 루틴, 할일, 일정, 단어 외우기와 타이머를 한 흐름에서 관리하는 실행 관리 앱입니다.</li>
+                <li>잊지 마는 생활 루틴, 할일, 일정, 단어 학습과 타이머를 한 흐름에서 관리하는 실행 관리 앱입니다.</li>
                 <li>설정: 앱 표시 방식, 계정, 백업, 데이터 삭제를 관리합니다.</li>
                 <li>계획표: 생활 루틴과 시간 있는 할일을 한 시간표에서 봅니다.</li>
                 <li>할일: 오늘 처리할 일을 관리하고, 일정은 읽기용으로 함께 확인합니다.</li>
                 <li>일정 등록: 날짜 일정, 기간 일정, D-day를 별도 일정 데이터로 저장합니다.</li>
                 <li>달력: 반복은 실제 완료한 날만 색칠하고, 일반 일정은 날짜 칸에 텍스트로 표시합니다.</li>
-                <li>단어 외우기: 먼저 외우고, 퀴즈로 확인하며, 복습 단어가 다시 섞입니다.</li>
+                <li>단어 학습: 먼저 익히고, 퀴즈로 확인하며, 복습 단어가 다시 섞입니다.</li>
                 <li>타이머: 집중과 휴식을 그때그때 설정해서 사용합니다.</li>
               </ul>
             ) : (
@@ -704,7 +1008,7 @@ function SettingsTab({
                 <li>Tasks: Manage today&apos;s tasks and review schedule entries as read-only items.</li>
                 <li>Schedule entry: Date events, period events, and D-days are stored separately from tasks.</li>
                 <li>Calendar: Repeating items are colored only on completed days, while ordinary events appear as text in date cells.</li>
-                <li>Vocabulary: Study first, quiz after, and review words return later.</li>
+                <li>Word Study: Study first, quiz after, and review words return later.</li>
                 <li>Timer: Set focus and break sessions as needed.</li>
               </ul>
             )}
@@ -866,6 +1170,55 @@ function PlanTab({
         )}
       </section>
     </section>
+  );
+}
+
+function InstallReadinessList({
+  readiness,
+  installState,
+  language
+}: {
+  readiness: InstallReadiness | null;
+  installState: InstallState;
+  language: AppLanguage;
+}) {
+  const items = [
+    {
+      key: "secure",
+      ok: readiness?.secureContext ?? false,
+      label: language === "ko" ? "보안 연결" : "Secure context"
+    },
+    {
+      key: "manifest",
+      ok: readiness?.manifest ?? false,
+      label: language === "ko" ? "앱 정보" : "Manifest"
+    },
+    {
+      key: "icons",
+      ok: readiness?.icons ?? false,
+      label: language === "ko" ? "설치 아이콘" : "Install icons"
+    },
+    {
+      key: "serviceWorker",
+      ok: readiness?.serviceWorker ?? false,
+      label: language === "ko" ? "오프라인 준비" : "Service worker"
+    },
+    {
+      key: "prompt",
+      ok: installState === "available" || installState === "installed",
+      label: language === "ko" ? "설치 버튼" : "Install prompt"
+    }
+  ];
+
+  return (
+    <div className={styles.installChecklist} aria-label={language === "ko" ? "앱 설치 준비 상태" : "Install readiness"}>
+      {items.map((item) => (
+        <span key={item.key} className={item.ok ? styles.readyItem : styles.pendingItem}>
+          <i>{item.ok ? "✓" : "·"}</i>
+          {item.label}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -2389,6 +2742,75 @@ function getNotificationStatusLabelEn(permission: ReminderPermission) {
   return "Enable browser notifications to receive timed task and schedule reminders.";
 }
 
+function getInstallStatusLabel(state: InstallState, language: AppLanguage) {
+  if (language === "en") {
+    if (state === "available") return "This app can be installed and used like a standalone app.";
+    if (state === "installed") return "The app is already running as an installed app.";
+    return "If your browser supports installation, use its install menu.";
+  }
+
+  if (state === "available") return "설치해서 독립 앱처럼 사용할 수 있습니다.";
+  if (state === "installed") return "이미 설치된 앱으로 실행 중입니다.";
+  return "브라우저가 지원하면 주소창이나 메뉴에서 설치할 수 있습니다.";
+}
+
+function getInstallHintLabel(state: InstallState, language: AppLanguage) {
+  if (language === "en") {
+    if (state === "available") return "Use the button here, or install from your browser address bar.";
+    if (state === "installed") return "The installed app opens in its own window and keeps the same local data.";
+    return "Chrome or Edge may show Install App in the address bar or browser menu.";
+  }
+
+  if (state === "available") return "아래 버튼으로 설치하거나 브라우저 주소창의 설치 아이콘을 사용할 수 있습니다.";
+  if (state === "installed") return "설치 앱은 별도 창으로 열리고 같은 로컬 데이터를 사용합니다.";
+  return "Chrome 또는 Edge 주소창/메뉴에서 앱 설치 항목이 보일 수 있습니다.";
+}
+
+function getInstallActionLabel(state: InstallState, language: AppLanguage) {
+  if (language === "en") {
+    if (state === "available") return "Install App";
+    if (state === "installed") return "Installed";
+    return "Use Browser Menu";
+  }
+
+  if (state === "available") return "앱 설치";
+  if (state === "installed") return "설치됨";
+  return "브라우저 메뉴에서 설치";
+}
+
+async function checkInstallReadiness(): Promise<InstallReadiness> {
+  const readiness: InstallReadiness = {
+    secureContext: window.isSecureContext,
+    manifest: false,
+    icons: false,
+    serviceWorker: false
+  };
+
+  try {
+    const manifestHref = document.querySelector<HTMLLinkElement>('link[rel="manifest"]')?.href;
+    if (manifestHref) {
+      const response = await fetch(manifestHref, { cache: "no-store" });
+      const manifest = (await response.json()) as Partial<{ name: string; short_name: string; display: string; icons: Array<{ sizes?: string }> }>;
+      readiness.manifest = Boolean(manifest.name && manifest.short_name && manifest.display === "standalone");
+      readiness.icons = Array.isArray(manifest.icons) && manifest.icons.some((icon) => icon.sizes?.includes("192")) && manifest.icons.some((icon) => icon.sizes?.includes("512"));
+    }
+  } catch {
+    readiness.manifest = false;
+    readiness.icons = false;
+  }
+
+  try {
+    if ("serviceWorker" in navigator) {
+      const registration = await navigator.serviceWorker.getRegistration();
+      readiness.serviceWorker = Boolean(registration);
+    }
+  } catch {
+    readiness.serviceWorker = false;
+  }
+
+  return readiness;
+}
+
 function getAuthMessageLabel(message: string, language: AppLanguage) {
   if (language === "ko") return message;
   if (message === "Google Drive 설정 필요") return "Google Drive setup required.";
@@ -2397,6 +2819,12 @@ function getAuthMessageLabel(message: string, language: AppLanguage) {
   if (message.includes("연결 중")) return "Connecting to Google Drive.";
   if (message.includes("동기화 중")) return "Syncing with Google Drive.";
   if (message.includes("동기화 완료")) return message.replace("Google Drive 동기화 완료", "Google Drive synced");
+  if (message.includes("현재 데이터가 다릅니다")) return "Drive data differs from current data. Choose which data to keep.";
+  if (message.includes("Drive 데이터를 불러오는 중")) return "Loading data from Drive.";
+  if (message.includes("현재 데이터를 Drive에 저장하는 중")) return "Saving current data to Drive.";
+  if (message.includes("Drive 충돌을 해결하지 못했습니다")) return "Could not resolve the Drive data conflict. Please reconnect.";
+  if (message.includes("Drive 데이터를 불러왔습니다")) return "Drive data loaded. Reloading the app.";
+  if (message.includes("복구할 Drive 이전 데이터가 없습니다")) return "No pre-Drive recovery data is available.";
   if (message.includes("연결이 만료")) return "The Drive connection expired. Please reconnect.";
   if (message.includes("연결을 완료하지 못했습니다")) return "Could not connect to Google Drive.";
   return message;
@@ -2473,19 +2901,46 @@ function showTaskNotification(task: Task) {
 function CalendarTab({
   tasks,
   schedules,
+  dailyNotes,
   selectedDate,
   language,
   onDateChange,
+  onToggleDone,
+  onSaveDailyNote,
   onOpenTasks
 }: {
   tasks: Task[];
   schedules: Schedule[];
+  dailyNotes: DailyNote[];
   selectedDate: string;
   language: AppLanguage;
   onDateChange: (date: string) => void;
+  onToggleDone: (task: Task, date: string) => void;
+  onSaveDailyNote: (date: string, text: string) => void;
   onOpenTasks: () => void;
 }) {
   const monthDays = getMonthDays(selectedDate);
+  const records = getMonthlyRecords(tasks, schedules, selectedDate);
+  const learnedWords = readWordProgressCount();
+  const dailyFocus = readDailyFocusCount();
+  const selectedSchedules = getCalendarTextSchedules(schedules, selectedDate);
+  const selectedProgressTasks = getCalendarProgressTasks(tasks, schedules, selectedDate);
+  const selectedTaskItems = selectedProgressTasks.filter((task) => task.owner !== "schedule");
+  const selectedScheduleTaskById = new Map(
+    selectedProgressTasks
+      .filter((task) => task.owner === "schedule" && task.scheduleId)
+      .map((task) => [task.scheduleId as string, task])
+  );
+  const selectedDoneCount = selectedProgressTasks.filter((task) => isTaskDoneOnDate(task, selectedDate)).length;
+  const selectedTotalCount = selectedProgressTasks.length;
+  const selectedRate = selectedTotalCount === 0 ? 0 : Math.round((selectedDoneCount / selectedTotalCount) * 100);
+  const selectedDailyNote = dailyNotes.find((note) => note.date === selectedDate);
+  const selectedNote = selectedDailyNote?.text ?? "";
+  const noteDates = new Set(dailyNotes.map((note) => note.date));
+  const monthKey = selectedDate.slice(0, 7);
+  const monthlyDailyNotes = dailyNotes
+    .filter((note) => note.date.startsWith(monthKey))
+    .sort((a, b) => a.date.localeCompare(b.date));
   const monthTitle = new Date(`${selectedDate}T00:00:00`).toLocaleDateString(language === "ko" ? "ko-KR" : "en-US", {
     year: "numeric",
     month: "long"
@@ -2493,7 +2948,6 @@ function CalendarTab({
 
   function openDate(date: string) {
     onDateChange(date);
-    onOpenTasks();
   }
 
   return (
@@ -2524,6 +2978,7 @@ function CalendarTab({
           const progressRate = progressTasks.length === 0 ? 0 : Math.round((progressDoneCount / progressTasks.length) * 100);
           const isDayComplete = progressTasks.length > 0 && progressDoneCount === progressTasks.length;
           const isSelected = day === selectedDate;
+          const hasDailyNote = noteDates.has(day);
           const date = new Date(`${day}T00:00:00`);
 
           return (
@@ -2537,14 +2992,17 @@ function CalendarTab({
               ].join(" ")}
               onClick={() => openDate(day)}
             >
-              <span className={date.getDay() === 0 ? `${styles.calendarDay} ${styles.sunday}` : styles.calendarDay}>
-                {date.getDate()}
-              </span>
-              {progressTasks.length > 0 && (
-                <span className={styles.calendarStats} aria-label={language === "ko" ? `일정 ${progressTasks.length}개, 진척률 ${progressRate}%` : `${progressTasks.length} items, ${progressRate}% done`}>
-                  {progressTasks.length} · {progressRate}%
+              <span className={styles.calendarCellTop}>
+                <span className={date.getDay() === 0 ? `${styles.calendarDay} ${styles.sunday}` : styles.calendarDay}>
+                  {date.getDate()}
                 </span>
-              )}
+                {progressTasks.length > 0 && (
+                  <span className={styles.calendarStats} aria-label={language === "ko" ? `일정 ${progressTasks.length}개, 진척률 ${progressRate}%` : `${progressTasks.length} items, ${progressRate}% done`}>
+                    <span>{progressTasks.length}</span>
+                    <span>{progressRate}%</span>
+                  </span>
+                )}
+              </span>
               <span className={styles.calendarTextList}>
                 {daySchedules.slice(0, 3).map((schedule) => (
                   <span
@@ -2568,12 +3026,195 @@ function CalendarTab({
                   <i style={{ width: `${progressRate}%` }} />
                 </span>
               )}
+              {hasDailyNote && (
+                <span className={styles.calendarNoteDot} aria-label={language === "ko" ? "기록 있음" : "Has note"} />
+              )}
             </button>
           );
         })}
       </div>
+      <section className={styles.calendarSelectedList}>
+        <div className={styles.calendarSelectedHeader}>
+          <div>
+            <h3>{language === "ko" ? `${formatDateHeading(selectedDate, language)} 일정` : `${formatDateHeading(selectedDate, language)} Items`}</h3>
+            <span className={styles.calendarSelectedMeta}>
+              {language === "ko"
+                ? `완료 ${selectedDoneCount}/${selectedTotalCount} · ${selectedRate}%`
+                : `${selectedDoneCount}/${selectedTotalCount} done · ${selectedRate}%`}
+            </span>
+          </div>
+          <button type="button" onClick={onOpenTasks}>
+            {language === "ko" ? "할일에서 보기" : "Open tasks"}
+          </button>
+        </div>
+        {[...selectedSchedules, ...selectedTaskItems].length > 0 ? (
+          <div>
+            {selectedSchedules.map((schedule) => (
+              <article key={schedule.id} className={schedule.status === "done" ? styles.calendarSelectedDone : ""}>
+                <button
+                  type="button"
+                  className={styles.calendarSelectedCheck}
+                  aria-label={language === "ko" ? `${schedule.title} 완료 전환` : `Toggle ${schedule.title}`}
+                  onClick={() => {
+                    const task = selectedScheduleTaskById.get(schedule.id);
+                    if (task) onToggleDone(task, selectedDate);
+                  }}
+                >
+                  ✓
+                </button>
+                <div>
+                  <strong>
+                    {schedule.time ? `${schedule.time} ` : ""}
+                    {schedule.title}
+                  </strong>
+                  <span>{schedule.kind === "deadline" ? formatDday(selectedDate, schedule.startDate) : getScheduleKindLabel(schedule, language)}</span>
+                </div>
+              </article>
+            ))}
+            {selectedTaskItems.map((task) => (
+              <article key={`${task.id}-${task.date ?? selectedDate}`} className={isTaskDoneOnDate(task, selectedDate) ? styles.calendarSelectedDone : ""}>
+                <button
+                  type="button"
+                  className={styles.calendarSelectedCheck}
+                  aria-label={language === "ko" ? `${task.title} 완료 전환` : `Toggle ${task.title}`}
+                  onClick={() => onToggleDone(task, selectedDate)}
+                >
+                  ✓
+                </button>
+                <div>
+                  <strong>{task.time ? `${task.time} ${task.title}` : task.title}</strong>
+                  <span>{isTaskDoneOnDate(task, selectedDate) ? (language === "ko" ? "완료" : "Done") : getTaskSourceLabel(task, language)}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p>{language === "ko" ? "이 날짜에 표시할 일정이 없습니다." : "No items for this date."}</p>
+        )}
+      </section>
+      <section className={styles.dailyNoteBox}>
+        <div className={styles.dailyNoteHeader}>
+          <div>
+            <strong>{language === "ko" ? `${formatDateHeading(selectedDate, language)} 기록` : `${formatDateHeading(selectedDate, language)} Note`}</strong>
+            <span>
+              {selectedDailyNote
+                ? language === "ko"
+                  ? `${formatDailyNoteSavedAt(selectedDailyNote.updatedAt)} 저장됨`
+                  : `Saved ${formatDailyNoteSavedAt(selectedDailyNote.updatedAt)}`
+                : language === "ko"
+                  ? "특별한 일이나 실제로 한 일을 남겨두기"
+                  : "Capture what happened or what you actually did."}
+            </span>
+          </div>
+          {selectedDailyNote && (
+            <button type="button" onClick={() => onSaveDailyNote(selectedDate, "")}>
+              {language === "ko" ? "기록 지우기" : "Clear Note"}
+            </button>
+          )}
+        </div>
+        <textarea
+          value={selectedNote}
+          onChange={(event) => onSaveDailyNote(selectedDate, event.target.value)}
+          onInput={(event) => onSaveDailyNote(selectedDate, event.currentTarget.value)}
+          placeholder={language === "ko" ? "예: 산책하고 카페에서 책 읽음. 생각보다 컨디션 좋았음." : "Ex: Took a walk and read at a cafe. Felt better than expected."}
+          rows={3}
+        />
+        {monthlyDailyNotes.length > 0 && (
+          <div className={styles.monthNoteList}>
+            <strong>{language === "ko" ? "이번 달에 쓴 기록" : "Notes This Month"}</strong>
+            <div>
+              {monthlyDailyNotes.map((note) => (
+                <button
+                  key={note.date}
+                  type="button"
+                  className={note.date === selectedDate ? styles.activeMonthNote : ""}
+                  onClick={() => onDateChange(note.date)}
+                >
+                  <span>{formatDateHeading(note.date, language)}</span>
+                  <em>{note.text.replace(/\s+/g, " ").slice(0, 32)}</em>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+      <section className={styles.recordSummary}>
+        <div className={styles.recordSummaryHeader}>
+          <strong>{language === "ko" ? "이번 달 기록" : "Monthly Records"}</strong>
+          <span>{records.completionRate}%</span>
+        </div>
+        <div className={styles.recordBar} aria-label={language === "ko" ? `완료율 ${records.completionRate}%` : `Completion ${records.completionRate}%`}>
+          <i style={{ width: `${records.completionRate}%` }} />
+        </div>
+        <div className={styles.recordGrid}>
+          <RecordItem label={language === "ko" ? "완료" : "Done"} value={`${records.done}/${records.total}`} />
+          <RecordItem label={language === "ko" ? "미완료" : "Not Done"} value={String(records.notDone)} />
+          <RecordItem label={language === "ko" ? "연기" : "Postponed"} value={String(records.postponed)} />
+          <RecordItem label={language === "ko" ? "취소" : "Cancelled"} value={String(records.cancelled)} />
+          <RecordItem label={language === "ko" ? "집중" : "Focus"} value={String(dailyFocus)} />
+          <RecordItem label={language === "ko" ? "단어" : "Words"} value={String(learnedWords)} />
+        </div>
+      </section>
     </section>
   );
+}
+
+function getMonthlyRecords(tasks: Task[], schedules: Schedule[], selectedDate: string) {
+  const monthKey = selectedDate.slice(0, 7);
+  const monthDays = getMonthDays(selectedDate).filter((day): day is string => Boolean(day));
+  const monthlyTasks = monthDays.flatMap((day) => getTasksForDate(tasks, day));
+  const monthlySchedules = schedules.filter((schedule) =>
+    schedule.endDate >= `${monthKey}-01` && schedule.startDate <= monthDays[monthDays.length - 1]
+  );
+  const monthlyScheduleTasks = monthDays.flatMap((day) => getScheduleTasksForDate(monthlySchedules, day));
+  const allItems = [...monthlyTasks, ...monthlyScheduleTasks];
+  const uniqueItems = dedupeTasksByDate(allItems);
+  const done = uniqueItems.filter((task) => isTaskDoneInMonth(task, monthKey)).length;
+  const postponed = uniqueItems.filter((task) => isTaskActionInMonth(task.postponedAt, monthKey)).length;
+  const cancelled = uniqueItems.filter((task) => isTaskActionInMonth(task.cancelledAt, monthKey)).length;
+  const total = uniqueItems.length;
+
+  return {
+    total,
+    done,
+    postponed,
+    cancelled,
+    notDone: Math.max(0, total - done),
+    completionRate: total === 0 ? 0 : Math.round((done / total) * 100)
+  };
+}
+
+function isTaskDoneInMonth(task: Task, monthKey: string) {
+  if (task.completedAt) return isTaskActionInMonth(task.completedAt, monthKey);
+  if (task.completedDates?.some((date) => date.startsWith(monthKey))) return true;
+  if (task.status !== "done") return false;
+  return task.date?.startsWith(monthKey) || task.dueDate?.startsWith(monthKey);
+}
+
+function isTaskActionInMonth(value: string | null | undefined, monthKey: string) {
+  return typeof value === "string" && value.slice(0, 7) === monthKey;
+}
+
+function dedupeTasksByDate(tasks: Task[]) {
+  const seen = new Set<string>();
+  return tasks.filter((task) => {
+    const key = `${task.id}-${task.date ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function readWordProgressCount() {
+  const value = readLocalStorageJson(learnedWordsStorageKey);
+  return Array.isArray(value) ? value.filter((item) => item && typeof item === "object" && "seenCount" in item).length : 0;
+}
+
+function readDailyFocusCount() {
+  const value = readLocalStorageJson(dailyFocusStorageKey);
+  if (!value || typeof value !== "object") return 0;
+  const record = value as Partial<{ date: string; count: number }>;
+  return record.date === getLocalDateKey() && typeof record.count === "number" ? Math.max(0, Math.round(record.count)) : 0;
 }
 
 
@@ -2582,6 +3223,22 @@ function getLocalDateKey(date = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function getInitialAppTab(): AppTab {
+  const view = new URLSearchParams(window.location.search).get("view") ?? "";
+  return viewParamToTab[view] ?? "plan";
+}
+
+function getInitialInstallState(): InstallState {
+  if (window.matchMedia("(display-mode: standalone)").matches) return "installed";
+  if ("standalone" in navigator && (navigator as Navigator & { standalone?: boolean }).standalone) return "installed";
+  return "unavailable";
+}
+
+function getTabViewParam(tab: AppTab) {
+  if (tab === "pomodoro") return "timer";
+  return tab;
 }
 
 
@@ -2618,7 +3275,10 @@ function backupAppData(tasks: Task[], schedules: Schedule[]) {
       settings: readLocalStorageJson(appSettingsStorageKey),
       wordProgress: readLocalStorageJson(learnedWordsStorageKey),
       memos: readLocalStorageJson(memoStorageKey),
-      planBlocks: readLocalStorageJson(planBlocksStorageKey)
+      planBlocks: readLocalStorageJson(planBlocksStorageKey),
+      timerSettings: readLocalStorageJson(timerSettingsStorageKey),
+      dailyFocus: readLocalStorageJson(dailyFocusStorageKey),
+      dailyNotes: readLocalStorageJson(dailyNotesStorageKey)
     }
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -2632,22 +3292,141 @@ function backupAppData(tasks: Task[], schedules: Schedule[]) {
   URL.revokeObjectURL(url);
 }
 
-async function deleteAppData(onDeleted: () => void) {
-  const confirmed = window.confirm("저장된 할일, 단어 기록, 메모, 계획표 루틴을 삭제할까요? 설정값은 유지됩니다.");
+async function restoreAppData(file: File, language: AppLanguage, onRecoverySaved: (createdAt: string) => void) {
+  const invalidMessage =
+    language === "ko"
+      ? "잊지 마에서 만든 올바른 백업 JSON 파일이 아닙니다."
+      : "This is not a valid Don't Forget backup JSON file.";
+  const failedMessage =
+    language === "ko"
+      ? "백업 파일을 읽지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요."
+      : "The backup file could not be read. Check that it is not damaged.";
+
+  if (file.size > 10 * 1024 * 1024) {
+    window.alert(language === "ko" ? "백업 파일은 10MB 이하여야 합니다." : "Backup files must be 10MB or smaller.");
+    return;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch {
+    window.alert(failedMessage);
+    return;
+  }
+
+  if (!isAppBackupPayload(payload)) {
+    window.alert(invalidMessage);
+    return;
+  }
+
+  const confirmed = window.confirm(
+    language === "ko"
+      ? `이 백업은 ${formatBackupDate(payload.exportedAt)}에 만들어졌습니다.\n현재 데이터를 백업 내용으로 교체할까요?`
+      : `This backup was created on ${formatBackupDate(payload.exportedAt)}.\nReplace the current data with this backup?`
+  );
   if (!confirmed) return;
 
+  try {
+    onRecoverySaved(saveLocalRecovery("restore"));
+    saveStoredTasks(payload.tasks);
+    saveStoredSchedules(payload.schedules);
+    restoreLocalStorageValue(appSettingsStorageKey, payload.localStorage?.settings);
+    restoreLocalStorageValue(learnedWordsStorageKey, payload.localStorage?.wordProgress);
+    restoreLocalStorageValue(memoStorageKey, payload.localStorage?.memos);
+    restoreLocalStorageValue(planBlocksStorageKey, payload.localStorage?.planBlocks);
+    restoreLocalStorageValue(timerSettingsStorageKey, payload.localStorage?.timerSettings);
+    restoreLocalStorageValue(dailyFocusStorageKey, payload.localStorage?.dailyFocus);
+    restoreLocalStorageValue(dailyNotesStorageKey, payload.localStorage?.dailyNotes);
+    window.alert(language === "ko" ? "백업을 복원했습니다. 앱을 다시 불러옵니다." : "Backup restored. The app will reload.");
+    window.location.reload();
+  } catch {
+    window.alert(failedMessage);
+  }
+}
+
+function isAppBackupPayload(value: unknown): value is AppBackupPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<AppBackupPayload>;
+  return (
+    payload.app === "잊지 마" &&
+    payload.version === 1 &&
+    typeof payload.exportedAt === "string" &&
+    !Number.isNaN(new Date(payload.exportedAt).getTime()) &&
+    Array.isArray(payload.tasks) &&
+    payload.tasks.every(isBackupTask) &&
+    Array.isArray(payload.schedules) &&
+    payload.schedules.every(isSchedule) &&
+    (payload.localStorage === undefined || (payload.localStorage !== null && typeof payload.localStorage === "object"))
+  );
+}
+
+function isBackupTask(value: unknown): value is Task {
+  if (!value || typeof value !== "object") return false;
+  const task = value as Partial<Task>;
+  return (
+    typeof task.id === "string" &&
+    typeof task.title === "string" &&
+    (task.date === null || typeof task.date === "string") &&
+    (task.dueDate === null || typeof task.dueDate === "string") &&
+    (task.time === null || typeof task.time === "string") &&
+    (task.source === "manual" || task.source === "routine" || task.source === "deadline" || task.source === "no_date") &&
+    (task.status === "planned" || task.status === "started" || task.status === "done" || task.status === "postponed" || task.status === "cancelled")
+  );
+}
+
+function restoreLocalStorageValue(key: string, value: unknown) {
+  if (value === undefined) return;
+  if (value === null) {
+    window.localStorage.removeItem(key);
+    return;
+  }
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function formatBackupDate(value: string) {
+  return new Date(value).toLocaleString("ko-KR", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+async function deleteAppData(language: AppLanguage, onDeleted: (createdAt: string) => void) {
+  const confirmed = window.confirm(
+    language === "ko"
+      ? "저장된 할일, 일정, 단어 기록, 메모, 계획표 루틴을 삭제할까요?\n삭제 직전 데이터는 자동 복구본으로 보관됩니다."
+      : "Delete saved tasks, schedules, word progress, memos, and planner routines?\nA recovery point will be saved first."
+  );
+  if (!confirmed) return;
+
+  const recoveryCreatedAt = saveLocalRecovery("delete");
   try {
     saveStoredTasks([]);
     saveStoredSchedules([]);
     window.localStorage.setItem(learnedWordsStorageKey, JSON.stringify([]));
     window.localStorage.setItem(memoStorageKey, JSON.stringify([]));
     window.localStorage.setItem(planBlocksStorageKey, JSON.stringify([]));
+    window.localStorage.setItem(dailyNotesStorageKey, JSON.stringify([]));
+    window.localStorage.removeItem(dailyFocusStorageKey);
   } finally {
-    onDeleted();
+    onDeleted(recoveryCreatedAt);
   }
 }
 
 function formatSyncTime(value: string) {
+  return new Date(value).toLocaleString("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+}
+
+function formatDailyNoteSavedAt(value: string) {
   return new Date(value).toLocaleString("ko-KR", {
     month: "numeric",
     day: "numeric",
@@ -2688,6 +3467,34 @@ function saveStoredPlanBlocks(blocks: PlanBlock[]) {
   } catch {
     // Plan persistence should never block the app shell.
   }
+}
+
+function loadStoredDailyNotes() {
+  try {
+    const rawValue = window.localStorage.getItem(dailyNotesStorageKey);
+    if (rawValue) {
+      const parsed = JSON.parse(rawValue);
+      if (Array.isArray(parsed)) return parsed.filter(isDailyNote);
+    }
+  } catch {
+    return [];
+  }
+
+  return [];
+}
+
+function saveStoredDailyNotes(notes: DailyNote[]) {
+  try {
+    window.localStorage.setItem(dailyNotesStorageKey, JSON.stringify(notes));
+  } catch {
+    // Daily notes should never block task usage.
+  }
+}
+
+function isDailyNote(value: unknown): value is DailyNote {
+  if (!value || typeof value !== "object") return false;
+  const note = value as Partial<DailyNote>;
+  return typeof note.date === "string" && typeof note.text === "string" && typeof note.updatedAt === "string";
 }
 
 function isPlanBlock(value: unknown): value is PlanBlock {

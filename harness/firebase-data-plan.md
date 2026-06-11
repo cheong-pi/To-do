@@ -1,4 +1,7 @@
-# Firebase 데이터 저장 계획
+# Firebase 데이터 저장 계획 (과거 설계)
+
+> 현재 앱은 Firebase를 사용하지 않습니다. 이 문서는 과거 검토 기록으로만 유지합니다.
+> 실제 구현 기준은 `current-status.md`와 `google-drive-sync.md`입니다.
 
 ## 핵심 원칙
 

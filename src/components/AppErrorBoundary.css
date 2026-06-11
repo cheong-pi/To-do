@@ -1,0 +1,41 @@
+.app-error {
+  display: grid;
+  min-height: 100vh;
+  padding: 24px;
+  place-items: center;
+  background: var(--color-bg);
+  color: var(--color-ink);
+}
+
+.app-error section {
+  width: min(100%, 420px);
+  padding: 28px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-medium);
+  background: var(--color-surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.app-error strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+}
+
+.app-error p {
+  margin: 10px 0 20px;
+  color: var(--color-muted);
+  line-height: 1.6;
+}
+
+.app-error button {
+  min-height: 42px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-weight: 700;
+}

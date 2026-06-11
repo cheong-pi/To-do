@@ -50,6 +50,9 @@ export type Task = {
   repeatDaysOfWeek?: number[];
   repeatDayOfMonth?: number | null;
   completedDates?: string[];
+  completedAt?: string | null;
+  postponedAt?: string | null;
+  cancelledAt?: string | null;
   isGenerated?: boolean;
   isManuallyEdited?: boolean;
   memo: string;
