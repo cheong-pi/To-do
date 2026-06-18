@@ -59,6 +59,8 @@ function normalizeSchedule(value: unknown): Schedule | null {
     time: typeof schedule.time === "string" ? schedule.time : null,
     kind: schedule.kind,
     status: schedule.status === "done" || schedule.status === "cancelled" ? schedule.status : "planned",
+    progressPercent: clampPercent(schedule.progressPercent),
+    remainingPercent: isFiniteNumber(schedule.remainingPercent) ? clampPercent(schedule.remainingPercent) : 100 - clampPercent(schedule.progressPercent),
     reminderAt: isValidDateTime(schedule.reminderAt) ? schedule.reminderAt : null,
     calendarColor: typeof schedule.calendarColor === "string" ? schedule.calendarColor : undefined,
     linkedTaskId: typeof schedule.linkedTaskId === "string" ? schedule.linkedTaskId : null,
@@ -82,4 +84,13 @@ function isDateKey(value: unknown): value is string {
 
 function isValidDateTime(value: unknown): value is string {
   return typeof value === "string" && !Number.isNaN(new Date(value).getTime());
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function clampPercent(value: unknown) {
+  if (!isFiniteNumber(value)) return 0;
+  return Math.min(100, Math.max(0, Math.round(value)));
 }

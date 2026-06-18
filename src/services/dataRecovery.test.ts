@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { appDataStorageKeys } from "./googleDriveSync";
+import { appDataStorageKeys } from "./appDataStorage";
 import { getLocalRecovery, restoreLocalRecovery, saveLocalRecovery } from "./dataRecovery";
 
 describe("dataRecovery", () => {

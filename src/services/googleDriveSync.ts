@@ -1,29 +1,12 @@
-const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
-const DRIVE_FILE_NAME = "dont-forget-data.json";
-const LAST_SYNC_KEY = "dont-forget-drive-last-sync";
-const SESSION_TOKEN_KEY = "dont-forget-drive-token";
-const RECOVERY_BACKUP_KEY = "dont-forget-drive-recovery";
+import { createAppDataBackup, isAppDataBackup, restoreAppDataBackup, type AppDataBackup } from "./appDataStorage";
 
-export const appDataStorageKeys = [
-  "dont-forget.tasks.v1",
-  "dont-forget.schedules.v1",
-  "dont-forget-app-settings",
-  "dont-forget-plan-blocks",
-  "dont-forget-memos",
-  "dont-forget-learned-words",
-  "dont-forget-timer-settings",
-  "dont-forget-daily-focus",
-  "dont-forget-daily-notes"
-] as const;
+const driveFileName = "dont-forget-data.json";
+const driveScope = "https://www.googleapis.com/auth/drive.appdata";
+const gisScriptUrl = "https://accounts.google.com/gsi/client";
 
 type TokenResponse = {
   access_token?: string;
   error?: string;
-};
-
-type TokenClient = {
-  callback: (response: TokenResponse) => void;
-  requestAccessToken: (options?: { prompt?: string }) => void;
 };
 
 type DriveFile = {
@@ -32,289 +15,195 @@ type DriveFile = {
   modifiedTime?: string;
 };
 
-export type DriveBackup = {
-  version: 1;
-  updatedAt: string;
-  data: Record<string, string | null>;
+type DriveListResponse = {
+  files?: DriveFile[];
 };
 
-type DriveRecoveryBackup = {
-  createdAt: string;
-  backup: DriveBackup;
+type GoogleTokenClient = {
+  requestAccessToken: (options?: { prompt?: string }) => void;
+};
+
+type GoogleAccounts = {
+  oauth2: {
+    initTokenClient: (options: {
+      client_id: string;
+      scope: string;
+      callback: (response: TokenResponse) => void;
+    }) => GoogleTokenClient;
+  };
 };
 
 declare global {
   interface Window {
     google?: {
-      accounts: {
-        oauth2: {
-          initTokenClient: (options: {
-            client_id: string;
-            scope: string;
-            callback: (response: TokenResponse) => void;
-          }) => TokenClient;
-          revoke: (token: string, callback: () => void) => void;
-        };
-      };
+      accounts?: GoogleAccounts;
     };
   }
 }
 
-let accessToken: string | null = sessionStorage.getItem(SESSION_TOKEN_KEY);
-let driveFileId: string | null = null;
-let pendingRemoteBackup: DriveBackup | null = null;
+export type DriveSyncState =
+  | "not_configured"
+  | "signed_out"
+  | "signing_in"
+  | "idle"
+  | "syncing"
+  | "error";
 
-export function isGoogleDriveConfigured() {
-  return Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID);
+export type DriveSyncStatus = {
+  state: DriveSyncState;
+  lastSyncedAt: string | null;
+  message: string;
+};
+
+export type DriveSyncResult = {
+  backup: AppDataBackup;
+  remoteModifiedAt: string | null;
+};
+
+let accessToken: string | null = null;
+
+export function getGoogleDriveClientId() {
+  const saved = window.localStorage.getItem("dont-forget-google-client-id");
+  return saved || import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 }
 
-export function isGoogleDriveConnected() {
+export function saveGoogleDriveClientId(clientId: string) {
+  const trimmed = clientId.trim();
+  if (trimmed) {
+    window.localStorage.setItem("dont-forget-google-client-id", trimmed);
+  } else {
+    window.localStorage.removeItem("dont-forget-google-client-id");
+  }
+}
+
+export function hasGoogleDriveToken() {
   return Boolean(accessToken);
 }
 
-export async function connectGoogleDrive() {
-  if (!isGoogleDriveConfigured()) {
-    throw new Error("GOOGLE_CLIENT_ID_MISSING");
-  }
+export function disconnectGoogleDrive() {
+  accessToken = null;
+}
 
-  await waitForGoogleIdentity();
+export async function connectGoogleDrive(clientId: string) {
+  if (!clientId.trim()) throw new Error("Google OAuth Client ID is required.");
+  await loadGoogleIdentityScript();
 
-  const token = await new Promise<string>((resolve, reject) => {
-    const client = window.google!.accounts.oauth2.initTokenClient({
-      client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
-      scope: DRIVE_SCOPE,
+  const google = window.google?.accounts;
+  if (!google) throw new Error("Google sign-in could not be loaded.");
+
+  accessToken = await new Promise<string>((resolve, reject) => {
+    const tokenClient = google.oauth2.initTokenClient({
+      client_id: clientId.trim(),
+      scope: driveScope,
       callback: (response) => {
         if (response.error || !response.access_token) {
-          reject(new Error(response.error ?? "GOOGLE_DRIVE_LOGIN_FAILED"));
+          reject(new Error(response.error || "Google sign-in was cancelled."));
           return;
         }
         resolve(response.access_token);
       }
     });
-
-    client.requestAccessToken({ prompt: "consent" });
-  });
-
-  accessToken = token;
-  sessionStorage.setItem(SESSION_TOKEN_KEY, token);
-  const remoteBackup = await downloadDriveBackup();
-
-  if (remoteBackup) {
-    const localBackup = createDriveBackup();
-    if (JSON.stringify(remoteBackup.data) === JSON.stringify(localBackup.data)) {
-      localStorage.setItem(LAST_SYNC_KEY, remoteBackup.updatedAt);
-      return { status: "synced" as const, updatedAt: remoteBackup.updatedAt };
-    }
-
-    saveDriveRecoveryBackup();
-    pendingRemoteBackup = remoteBackup;
-    return { status: "conflict" as const, updatedAt: remoteBackup.updatedAt };
-  }
-
-  const backup = createDriveBackup();
-  await uploadDriveBackup(backup);
-  localStorage.setItem(LAST_SYNC_KEY, backup.updatedAt);
-  return { status: "synced" as const, updatedAt: backup.updatedAt };
-}
-
-export async function resolveDriveConflict(choice: "remote" | "local") {
-  if (!accessToken || !pendingRemoteBackup) throw new Error("GOOGLE_DRIVE_CONFLICT_NOT_FOUND");
-
-  if (choice === "remote") {
-    const updatedAt = pendingRemoteBackup.updatedAt;
-    applyDriveBackup(pendingRemoteBackup);
-    localStorage.setItem(LAST_SYNC_KEY, updatedAt);
-    pendingRemoteBackup = null;
-    return updatedAt;
-  }
-
-  const backup = createDriveBackup();
-  await uploadDriveBackup(backup);
-  localStorage.setItem(LAST_SYNC_KEY, backup.updatedAt);
-  pendingRemoteBackup = null;
-  return backup.updatedAt;
-}
-
-export async function disconnectGoogleDrive() {
-  const token = accessToken;
-  accessToken = null;
-  driveFileId = null;
-  pendingRemoteBackup = null;
-  sessionStorage.removeItem(SESSION_TOKEN_KEY);
-  if (!token || !window.google) return;
-
-  await new Promise<void>((resolve) => {
-    window.google!.accounts.oauth2.revoke(token, resolve);
+    tokenClient.requestAccessToken({ prompt: "consent" });
   });
 }
 
-export async function syncToGoogleDrive() {
-  if (!accessToken) throw new Error("GOOGLE_DRIVE_NOT_CONNECTED");
-  const backup = createDriveBackup();
-  await uploadDriveBackup(backup);
-  localStorage.setItem(LAST_SYNC_KEY, backup.updatedAt);
-  return backup.updatedAt;
-}
-
-export function getLastDriveSync() {
-  return localStorage.getItem(LAST_SYNC_KEY);
-}
-
-export function getDriveRecoveryCreatedAt() {
-  return readDriveRecoveryBackup()?.createdAt ?? null;
-}
-
-export function restoreDriveRecoveryBackup() {
-  const recovery = readDriveRecoveryBackup();
-  if (!recovery) return false;
-  applyDriveBackup(recovery.backup);
-  localStorage.removeItem(RECOVERY_BACKUP_KEY);
-  return true;
-}
-
-export function clearDriveRecoveryBackup() {
-  localStorage.removeItem(RECOVERY_BACKUP_KEY);
-}
-
-export function createDriveBackup(): DriveBackup {
-  return {
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    data: Object.fromEntries(appDataStorageKeys.map((key) => [key, localStorage.getItem(key)]))
-  };
-}
-
-function saveDriveRecoveryBackup() {
-  const recovery: DriveRecoveryBackup = {
-    createdAt: new Date().toISOString(),
-    backup: createDriveBackup()
-  };
-  localStorage.setItem(RECOVERY_BACKUP_KEY, JSON.stringify(recovery));
-}
-
-function readDriveRecoveryBackup(): DriveRecoveryBackup | null {
-  const rawValue = localStorage.getItem(RECOVERY_BACKUP_KEY);
-  if (!rawValue) return null;
-
-  try {
-    const recovery = JSON.parse(rawValue) as Partial<DriveRecoveryBackup>;
-    if (
-      typeof recovery.createdAt !== "string" ||
-      !recovery.backup ||
-      recovery.backup.version !== 1 ||
-      typeof recovery.backup.updatedAt !== "string" ||
-      !recovery.backup.data ||
-      typeof recovery.backup.data !== "object"
-    ) {
-      localStorage.removeItem(RECOVERY_BACKUP_KEY);
-      return null;
-    }
-    return recovery as DriveRecoveryBackup;
-  } catch {
-    localStorage.removeItem(RECOVERY_BACKUP_KEY);
-    return null;
-  }
-}
-
-function applyDriveBackup(backup: DriveBackup) {
-  appDataStorageKeys.forEach((key) => {
-    const value = backup.data[key];
-    if (typeof value === "string") {
-      localStorage.setItem(key, value);
-    } else {
-      localStorage.removeItem(key);
-    }
-  });
-}
-
-async function downloadDriveBackup() {
+export async function downloadGoogleDriveBackup(): Promise<DriveSyncResult | null> {
   const file = await findDriveFile();
   if (!file) return null;
-  driveFileId = file.id;
 
-  const response = await driveFetch(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`
-  );
-  const backup = (await response.json()) as Partial<DriveBackup>;
-  if (backup.version !== 1 || !backup.data || typeof backup.updatedAt !== "string") {
-    throw new Error("GOOGLE_DRIVE_BACKUP_INVALID");
-  }
-  return backup as DriveBackup;
+  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`);
+  const payload: unknown = await response.json();
+  if (!isAppDataBackup(payload)) throw new Error("Drive data is not a valid Don't Forget backup.");
+
+  return {
+    backup: payload,
+    remoteModifiedAt: file.modifiedTime ?? null
+  };
 }
 
-async function uploadDriveBackup(backup: DriveBackup) {
-  if (!driveFileId) {
-    driveFileId = (await findDriveFile())?.id ?? null;
+export async function uploadGoogleDriveBackup() {
+  const backup = createAppDataBackup();
+  const file = await findDriveFile();
+  const body = JSON.stringify(backup, null, 2);
+
+  if (file) {
+    await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${file.id}?uploadType=media`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body
+    });
+    return backup;
   }
 
-  const metadata = driveFileId
-    ? { name: DRIVE_FILE_NAME }
-    : { name: DRIVE_FILE_NAME, parents: ["appDataFolder"] };
-  const boundary = `dont-forget-${Date.now()}`;
-  const body = [
-    `--${boundary}`,
-    "Content-Type: application/json; charset=UTF-8",
-    "",
-    JSON.stringify(metadata),
-    `--${boundary}`,
-    "Content-Type: application/json; charset=UTF-8",
-    "",
-    JSON.stringify(backup),
-    `--${boundary}--`
-  ].join("\r\n");
-
-  const endpoint = driveFileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(driveFileId)}?uploadType=multipart`
-    : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
-  const response = await driveFetch(endpoint, {
-    method: driveFileId ? "PATCH" : "POST",
+  const boundary = `dont_forget_${Date.now()}`;
+  await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+    method: "POST",
     headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
-    body
+    body: [
+      `--${boundary}`,
+      "Content-Type: application/json; charset=UTF-8",
+      "",
+      JSON.stringify({ name: driveFileName, parents: ["appDataFolder"] }),
+      `--${boundary}`,
+      "Content-Type: application/json",
+      "",
+      body,
+      `--${boundary}--`
+    ].join("\r\n")
   });
-  const file = (await response.json()) as DriveFile;
-  driveFileId = file.id;
+  return backup;
+}
+
+export function restoreGoogleDriveBackup(backup: AppDataBackup) {
+  restoreAppDataBackup(backup);
 }
 
 async function findDriveFile() {
-  const query = encodeURIComponent(`name = '${DRIVE_FILE_NAME}' and trashed = false`);
-  const response = await driveFetch(
-    `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${query}&fields=files(id,name,modifiedTime)&pageSize=1`
-  );
-  const result = (await response.json()) as { files?: DriveFile[] };
-  return result.files?.[0] ?? null;
+  const params = new URLSearchParams({
+    spaces: "appDataFolder",
+    q: `name='${driveFileName}' and trashed=false`,
+    fields: "files(id,name,modifiedTime)",
+    pageSize: "1"
+  });
+  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`);
+  const payload = (await response.json()) as DriveListResponse;
+  return payload.files?.[0] ?? null;
 }
 
 async function driveFetch(url: string, init: RequestInit = {}) {
-  if (!accessToken) throw new Error("GOOGLE_DRIVE_NOT_CONNECTED");
-
+  if (!accessToken) throw new Error("Google Drive is not connected.");
   const response = await fetch(url, {
     ...init,
     headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...init.headers
+      ...init.headers,
+      Authorization: `Bearer ${accessToken}`
     }
   });
 
   if (!response.ok) {
-    if (response.status === 401) {
-      accessToken = null;
-      sessionStorage.removeItem(SESSION_TOKEN_KEY);
-    }
-    throw new Error(`GOOGLE_DRIVE_${response.status}`);
+    throw new Error(`Google Drive request failed: ${response.status}`);
   }
+
   return response;
 }
 
-async function waitForGoogleIdentity() {
-  if (window.google?.accounts?.oauth2) return;
+function loadGoogleIdentityScript() {
+  if (window.google?.accounts) return Promise.resolve();
 
-  await new Promise<void>((resolve, reject) => {
-    const timeout = window.setTimeout(() => reject(new Error("GOOGLE_IDENTITY_LOAD_FAILED")), 10_000);
-    const timer = window.setInterval(() => {
-      if (!window.google?.accounts?.oauth2) return;
-      window.clearInterval(timer);
-      window.clearTimeout(timeout);
-      resolve();
-    }, 50);
+  return new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${gisScriptUrl}"]`);
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Google sign-in script failed to load.")), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = gisScriptUrl;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Google sign-in script failed to load."));
+    document.head.appendChild(script);
   });
 }

@@ -25,11 +25,11 @@ describe("sortTodayTasks", () => {
     ]);
   });
 
-  it("sorts tasks in the same group by time and then due date", () => {
+  it("sorts every timed task by the 24-hour time regardless of source group", () => {
     const result = sortTodayTasks([
       makeTask("late", "timed_today", "18:00", "2026-06-10"),
-      makeTask("early-late-due", "timed_today", "09:00", "2026-06-20"),
-      makeTask("early-near-due", "timed_today", "09:00", "2026-06-12"),
+      makeTask("early-late-due", "repeat_today", "09:00", "2026-06-20"),
+      makeTask("early-near-due", "pulled_to_today", "09:00", "2026-06-12"),
       makeTask("untimed", "timed_today", null, "2026-06-11")
     ]);
 

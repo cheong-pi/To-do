@@ -1,4 +1,4 @@
-const CACHE_NAME = "dont-forget-v4";
+const CACHE_NAME = "dont-forget-v5";
 const APP_FILES = [
   "/",
   "/index.html",

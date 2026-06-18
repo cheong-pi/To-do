@@ -1,11 +1,11 @@
-import { appDataStorageKeys, type DriveBackup } from "./googleDriveSync";
+import { appDataStorageKeys, type AppDataBackup } from "./appDataStorage";
 
 const RECOVERY_KEY = "dont-forget-local-recovery";
 
 type LocalRecovery = {
   createdAt: string;
   reason: "restore" | "delete";
-  backup: DriveBackup;
+  backup: AppDataBackup;
 };
 
 export function saveLocalRecovery(reason: LocalRecovery["reason"]) {

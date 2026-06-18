@@ -12,11 +12,17 @@ const sortGroupOrder: TodaySortGroup[] = [
 export function sortTodayTasks(tasks: Task[]) {
   return [...tasks]
     .sort((a, b) => {
+      const aHasTime = Boolean(a.time);
+      const bHasTime = Boolean(b.time);
+      if (aHasTime && bHasTime) {
+        const timeDiff = a.time!.localeCompare(b.time!);
+        if (timeDiff !== 0) return timeDiff;
+      } else if (aHasTime !== bHasTime) {
+        return aHasTime ? -1 : 1;
+      }
+
       const groupDiff = getGroupIndex(a.todaySortGroup) - getGroupIndex(b.todaySortGroup);
       if (groupDiff !== 0) return groupDiff;
-
-      const timeDiff = (a.time ?? "99:99").localeCompare(b.time ?? "99:99");
-      if (timeDiff !== 0) return timeDiff;
 
       return (a.dueDate ?? "9999-12-31").localeCompare(b.dueDate ?? "9999-12-31");
     });

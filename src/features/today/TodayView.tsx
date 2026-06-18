@@ -1,21 +1,30 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { sortTodayTasks } from "./todayRules";
+import { getTaskReminderDate } from "./reminderRules";
+import { keepEndAtOrAfterStart } from "./timeRules";
 import styles from "./TodayView.module.css";
 import { loadStoredSchedules, saveStoredSchedules } from "../../services/scheduleStorage";
 import { loadStoredTasks, saveStoredTasks } from "../../services/taskStorage";
 import { getLocalRecovery, restoreLocalRecovery, saveLocalRecovery } from "../../services/dataRecovery";
+import { appDataStorageKeys } from "../../services/appDataStorage";
 import {
   connectGoogleDrive,
-  createDriveBackup,
   disconnectGoogleDrive,
-  getDriveRecoveryCreatedAt,
-  getLastDriveSync,
-  isGoogleDriveConfigured,
-  isGoogleDriveConnected,
-  resolveDriveConflict,
-  restoreDriveRecoveryBackup,
-  syncToGoogleDrive
+  downloadGoogleDriveBackup,
+  getGoogleDriveClientId,
+  hasGoogleDriveToken,
+  restoreGoogleDriveBackup,
+  saveGoogleDriveClientId,
+  uploadGoogleDriveBackup,
+  type DriveSyncStatus
 } from "../../services/googleDriveSync";
+import {
+  getNativeNotificationPermission,
+  isNativeNotificationPlatform,
+  requestNativeNotificationPermission,
+  showNativeTestNotification,
+  syncNativeNotifications
+} from "../../services/nativeNotifications";
 import type { RepeatKind, Schedule, Task, TaskKindOption, TaskOwner, TaskSource, TaskStatus, TodaySortGroup } from "../../types/task";
 
 type AppTab = "plan" | "tasks" | "calendar" | "words" | "pomodoro" | "memo" | "settings";
@@ -70,7 +79,12 @@ const MemoTab = lazy(() => import("./MemoTab"));
 type AppSettings = {
   language: AppLanguage;
   fontMode: FontMode;
+  enabledFeatures: OptionalFeatureSettings;
 };
+
+type OptionalFeature = "words" | "pomodoro" | "memo";
+
+type OptionalFeatureSettings = Record<OptionalFeature, boolean>;
 
 type PlanBlock = {
   id: string;
@@ -111,6 +125,12 @@ const tabs: AppTab[] = [
   "memo",
   "settings"
 ];
+
+const defaultEnabledFeatures: OptionalFeatureSettings = {
+  words: false,
+  pomodoro: false,
+  memo: false
+};
 
 const viewParamToTab: Record<string, AppTab> = {
   plan: "plan",
@@ -167,6 +187,9 @@ export function TodayView() {
   const [activeTab, setActiveTab] = useState<AppTab>(() => getInitialAppTab());
   const [appLanguage, setAppLanguage] = useState<AppLanguage>(() => loadAppSettings().language);
   const [fontMode, setFontMode] = useState<FontMode>(() => loadAppSettings().fontMode);
+  const [enabledFeatures, setEnabledFeatures] = useState<OptionalFeatureSettings>(
+    () => loadAppSettings().enabledFeatures
+  );
   const [notificationPermission, setNotificationPermission] = useState<ReminderPermission>(() => getNotificationPermission());
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [dataResetToken, setDataResetToken] = useState(0);
@@ -182,26 +205,29 @@ export function TodayView() {
   const [selectedDate, setSelectedDate] = useState(() => getLocalDateKey());
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [activeCreatePanel, setActiveCreatePanel] = useState<"task" | "schedule" | null>(null);
-  const [isDriveConnected, setIsDriveConnected] = useState(() => isGoogleDriveConnected());
-  const [driveRecoveryCreatedAt, setDriveRecoveryCreatedAt] = useState(() => getDriveRecoveryCreatedAt());
   const [localRecoveryCreatedAt, setLocalRecoveryCreatedAt] = useState(() => getLocalRecovery()?.createdAt ?? null);
-  const [driveConflictAt, setDriveConflictAt] = useState<string | null>(null);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [installState, setInstallState] = useState<InstallState>(() => getInitialInstallState());
   const [installReadiness, setInstallReadiness] = useState<InstallReadiness | null>(null);
-  const [authMessage, setAuthMessage] = useState(
-    isGoogleDriveConfigured()
-      ? getLastDriveSync()
-        ? `마지막 Drive 동기화 · ${formatSyncTime(getLastDriveSync()!)}`
-        : "Google Drive 연결 준비됨"
-      : "Google Drive 설정 필요"
-  );
-  const lastUploadedSnapshot = useRef("");
+  const [googleClientId, setGoogleClientId] = useState(() => getGoogleDriveClientId());
+  const [driveSyncStatus, setDriveSyncStatus] = useState<DriveSyncStatus>(() => ({
+    state: getGoogleDriveClientId() ? "signed_out" : "not_configured",
+    lastSyncedAt: null,
+    message: getGoogleDriveClientId() ? "Google Drive 연결 전입니다." : "Google OAuth Client ID가 필요합니다."
+  }));
   const firedReminderKeys = useRef(new Set<string>());
+  const driveUploadTimer = useRef<number | null>(null);
+  const hasCompletedInitialDriveCheck = useRef(false);
+  const usesNativeNotifications = isNativeNotificationPlatform();
+  const currentDateKey = useMemo(() => getLocalDateKey(new Date(nowTick)), [nowTick]);
 
   const todayTasks = useMemo(
     () => sortTodayTasks([...getTasksForDate(tasks, selectedDate), ...getScheduleTasksForDate(schedules, selectedDate)]),
     [tasks, schedules, selectedDate]
+  );
+  const reminderTasks = useMemo(
+    () => sortTodayTasks([...getTasksForDate(tasks, currentDateKey), ...getScheduleTasksForDate(schedules, currentDateKey)]),
+    [tasks, schedules, currentDateKey]
   );
   const activeReminderTasks = useMemo(
     () => getDueReminderTasks(todayTasks, selectedDate, nowTick),
@@ -209,12 +235,26 @@ export function TodayView() {
   );
   const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
   const fixedTaskTags = useMemo(() => getFixedTaskTags(tasks), [tasks]);
+  const visibleTabs = useMemo(
+    () =>
+      tabs.filter((tab) => {
+        if (tab === "words" || tab === "pomodoro" || tab === "memo") return enabledFeatures[tab];
+        return true;
+      }),
+    [enabledFeatures]
+  );
 
   useEffect(() => {
     document.documentElement.dataset.fontMode = fontMode;
     document.documentElement.lang = appLanguage === "ko" ? "ko" : "en";
-    saveAppSettings({ language: appLanguage, fontMode });
-  }, [appLanguage, fontMode]);
+    saveAppSettings({ language: appLanguage, fontMode, enabledFeatures });
+  }, [appLanguage, fontMode, enabledFeatures]);
+
+  useEffect(() => {
+    if ((activeTab === "words" || activeTab === "pomodoro" || activeTab === "memo") && !enabledFeatures[activeTab]) {
+      setActiveTab("plan");
+    }
+  }, [activeTab, enabledFeatures]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowTick(Date.now()), 30_000);
@@ -280,42 +320,89 @@ export function TodayView() {
   }, [dailyNotes]);
 
   useEffect(() => {
-    if (!isDriveConnected) return;
+    saveGoogleDriveClientId(googleClientId);
+    setDriveSyncStatus((current) => {
+      if (hasGoogleDriveToken()) return current;
+      return {
+        state: googleClientId.trim() ? "signed_out" : "not_configured",
+        lastSyncedAt: current.lastSyncedAt,
+        message: googleClientId.trim() ? "Google Drive 연결 전입니다." : "Google OAuth Client ID가 필요합니다."
+      };
+    });
+  }, [googleClientId]);
 
-    const sync = async () => {
-      const snapshot = JSON.stringify(createDriveBackup().data);
-      if (snapshot === lastUploadedSnapshot.current) return;
+  useEffect(() => {
+    if (!hasGoogleDriveToken()) return;
+    if (!hasCompletedInitialDriveCheck.current) return;
 
-      try {
-        const updatedAt = await syncToGoogleDrive();
-        lastUploadedSnapshot.current = snapshot;
-        setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(updatedAt)}`);
-      } catch {
-        setIsDriveConnected(false);
-        setAuthMessage("Drive 연결이 만료되었습니다. 다시 연결해 주세요.");
+    if (driveUploadTimer.current) window.clearTimeout(driveUploadTimer.current);
+    driveUploadTimer.current = window.setTimeout(() => {
+      void handleDriveUpload("auto");
+    }, 5000);
+
+    return () => {
+      if (driveUploadTimer.current) window.clearTimeout(driveUploadTimer.current);
+    };
+  }, [tasks, schedules, dailyNotes, appLanguage, fontMode, enabledFeatures]);
+
+  useEffect(() => {
+    const managedKeys = new Set<string>(appDataStorageKeys);
+    const originalSetItem = Storage.prototype.setItem;
+    const originalRemoveItem = Storage.prototype.removeItem;
+
+    Storage.prototype.setItem = function setItemWithAppDataEvent(key: string, value: string) {
+      originalSetItem.call(this, key, value);
+      if (this === window.localStorage && managedKeys.has(key)) {
+        window.dispatchEvent(new CustomEvent("dont-forget-app-data-change"));
       }
     };
 
-    const timer = window.setInterval(() => void sync(), 15_000);
-    const handleVisibility = () => {
-      if (document.visibilityState === "hidden") void sync();
+    Storage.prototype.removeItem = function removeItemWithAppDataEvent(key: string) {
+      originalRemoveItem.call(this, key);
+      if (this === window.localStorage && managedKeys.has(key)) {
+        window.dispatchEvent(new CustomEvent("dont-forget-app-data-change"));
+      }
     };
-    document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", handleVisibility);
+      Storage.prototype.setItem = originalSetItem;
+      Storage.prototype.removeItem = originalRemoveItem;
     };
-  }, [isDriveConnected]);
+  }, []);
 
   useEffect(() => {
+    const scheduleDriveUpload = () => {
+      if (!hasGoogleDriveToken()) return;
+      if (!hasCompletedInitialDriveCheck.current) return;
+      if (driveUploadTimer.current) window.clearTimeout(driveUploadTimer.current);
+      driveUploadTimer.current = window.setTimeout(() => {
+        void handleDriveUpload("auto");
+      }, 5000);
+    };
+
+    window.addEventListener("dont-forget-app-data-change", scheduleDriveUpload);
+    return () => window.removeEventListener("dont-forget-app-data-change", scheduleDriveUpload);
+  }, []);
+
+  useEffect(() => {
+    if (!usesNativeNotifications) return;
+    void getNativeNotificationPermission().then(setNotificationPermission);
+  }, [usesNativeNotifications]);
+
+  useEffect(() => {
+    if (!usesNativeNotifications || notificationPermission !== "granted") return;
+    void syncNativeNotifications(tasks, schedules, appLanguage);
+  }, [tasks, schedules, appLanguage, notificationPermission, usesNativeNotifications]);
+
+  useEffect(() => {
+    if (usesNativeNotifications) return;
     if (notificationPermission !== "granted") return;
 
-    const timers = scheduleBrowserReminders(todayTasks, selectedDate, firedReminderKeys.current);
+    const timers = scheduleBrowserReminders(reminderTasks, currentDateKey, firedReminderKeys.current, appLanguage);
     return () => {
       timers.forEach((timer) => window.clearTimeout(timer));
     };
-  }, [todayTasks, selectedDate, notificationPermission]);
+  }, [reminderTasks, currentDateKey, notificationPermission, appLanguage, usesNativeNotifications]);
 
   function updateTask(nextTask: Task) {
     setTasks((current) => current.map((task) => (task.id === nextTask.id ? nextTask : task)));
@@ -475,93 +562,6 @@ export function TodayView() {
     });
   }
 
-  async function handleGoogleDrive() {
-    if (!isGoogleDriveConfigured()) {
-      setAuthMessage(".env에 Google OAuth 클라이언트 ID를 넣어 주세요.");
-      return;
-    }
-
-    try {
-      if (isDriveConnected) {
-        await disconnectGoogleDrive();
-        setIsDriveConnected(false);
-        setAuthMessage("Google Drive 연결 준비됨");
-        return;
-      }
-
-      setAuthMessage("Google Drive 연결 중");
-      const result = await connectGoogleDrive();
-      setDriveRecoveryCreatedAt(getDriveRecoveryCreatedAt());
-
-      if (result.status === "conflict") {
-        setDriveConflictAt(result.updatedAt);
-        setIsDriveConnected(false);
-        setAuthMessage("Drive 데이터와 현재 데이터가 다릅니다. 사용할 데이터를 선택해 주세요.");
-        return;
-      }
-
-      setDriveConflictAt(null);
-      setIsDriveConnected(true);
-      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
-      setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(result.updatedAt)}`);
-    } catch {
-      setAuthMessage("Google Drive 연결을 완료하지 못했습니다.");
-    }
-  }
-
-  async function handleDriveSync() {
-    if (!isDriveConnected) return;
-
-    try {
-      setAuthMessage("Google Drive 동기화 중");
-      const updatedAt = await syncToGoogleDrive();
-      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
-      setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(updatedAt)}`);
-    } catch {
-      setIsDriveConnected(false);
-      setAuthMessage("Drive 연결이 만료되었습니다. 다시 연결해 주세요.");
-    }
-  }
-
-  async function handleDriveConflict(choice: "remote" | "local") {
-    try {
-      setAuthMessage(choice === "remote" ? "Drive 데이터를 불러오는 중" : "현재 데이터를 Drive에 저장하는 중");
-      const updatedAt = await resolveDriveConflict(choice);
-      setDriveConflictAt(null);
-      setIsDriveConnected(true);
-
-      if (choice === "remote") {
-        setAuthMessage("Drive 데이터를 불러왔습니다. 앱을 새로 여는 중입니다.");
-        window.location.reload();
-        return;
-      }
-
-      lastUploadedSnapshot.current = JSON.stringify(createDriveBackup().data);
-      setAuthMessage(`Google Drive 동기화 완료 · ${formatSyncTime(updatedAt)}`);
-    } catch {
-      setIsDriveConnected(false);
-      setAuthMessage("Drive 충돌을 해결하지 못했습니다. 다시 연결해 주세요.");
-    }
-  }
-
-  function handleDriveRecovery() {
-    if (!driveRecoveryCreatedAt) return;
-    const confirmed = window.confirm(
-      appLanguage === "ko"
-        ? `${formatBackupDate(driveRecoveryCreatedAt)}의 Drive 연결 전 데이터로 되돌릴까요?\n현재 로컬 데이터는 교체됩니다.`
-        : `Restore the local data saved before Drive connection on ${formatBackupDate(driveRecoveryCreatedAt)}?\nCurrent local data will be replaced.`
-    );
-    if (!confirmed) return;
-
-    if (!restoreDriveRecoveryBackup()) {
-      setDriveRecoveryCreatedAt(null);
-      setAuthMessage(appLanguage === "ko" ? "복구할 Drive 이전 데이터가 없습니다." : "No pre-Drive recovery data is available.");
-      return;
-    }
-
-    window.location.reload();
-  }
-
   function handleLocalRecovery() {
     if (!localRecoveryCreatedAt) return;
     const confirmed = window.confirm(
@@ -579,6 +579,13 @@ export function TodayView() {
   }
 
   async function handleNotificationRequest() {
+    if (usesNativeNotifications) {
+      const nextPermission = await requestNativeNotificationPermission();
+      setNotificationPermission(nextPermission);
+      if (nextPermission === "granted") await showNativeTestNotification(appLanguage);
+      return;
+    }
+
     if (!("Notification" in window)) {
       setNotificationPermission("unsupported");
       return;
@@ -586,6 +593,26 @@ export function TodayView() {
 
     const nextPermission = await Notification.requestPermission();
     setNotificationPermission(nextPermission);
+    if (nextPermission === "granted") {
+      await showSystemNotification(
+        appLanguage === "ko" ? "잊지 마" : "Don't Forget",
+        appLanguage === "ko" ? "시스템 알림이 켜졌어요." : "System notifications are enabled.",
+        "dont-forget-permission-test"
+      );
+    }
+  }
+
+  async function handleNotificationTest() {
+    if (notificationPermission !== "granted") return;
+    if (usesNativeNotifications) {
+      await showNativeTestNotification(appLanguage);
+      return;
+    }
+    await showSystemNotification(
+      appLanguage === "ko" ? "잊지 마" : "Don't Forget",
+      appLanguage === "ko" ? "설정한 시간이 되면 이런 알림이 표시됩니다." : "Your timed reminders will appear like this.",
+      `dont-forget-manual-test-${Date.now()}`
+    );
   }
 
   async function handleInstallApp() {
@@ -595,6 +622,113 @@ export function TodayView() {
     const choice = await installPrompt.userChoice;
     setInstallPrompt(null);
     setInstallState(choice.outcome === "accepted" ? "installed" : "unavailable");
+  }
+
+  async function handleDriveConnect() {
+    if (!googleClientId.trim()) {
+      window.alert(appLanguage === "ko" ? "Google OAuth Client ID를 먼저 입력해 주세요." : "Enter a Google OAuth Client ID first.");
+      return;
+    }
+
+    setDriveSyncStatus((current) => ({ ...current, state: "signing_in", message: "Google Drive에 연결하는 중입니다." }));
+    try {
+      await connectGoogleDrive(googleClientId);
+      setDriveSyncStatus({
+        state: "idle",
+        lastSyncedAt: null,
+        message: "Google Drive에 연결되었습니다."
+      });
+      hasCompletedInitialDriveCheck.current = true;
+      await handleDriveDownload({ silentWhenEmpty: true });
+      await handleDriveUpload("manual");
+    } catch (error) {
+      setDriveSyncStatus({
+        state: "error",
+        lastSyncedAt: null,
+        message: error instanceof Error ? error.message : "Google Drive 연결에 실패했습니다."
+      });
+    }
+  }
+
+  async function handleDriveUpload(mode: "manual" | "auto") {
+    if (!hasGoogleDriveToken()) {
+      if (mode === "manual") window.alert(appLanguage === "ko" ? "먼저 Google Drive에 연결해 주세요." : "Connect Google Drive first.");
+      return;
+    }
+
+    setDriveSyncStatus((current) => ({ ...current, state: "syncing", message: "Google Drive에 저장하는 중입니다." }));
+    try {
+      const backup = await uploadGoogleDriveBackup();
+      setDriveSyncStatus({
+        state: "idle",
+        lastSyncedAt: backup.updatedAt,
+        message: mode === "auto" ? "변경사항을 Google Drive에 자동 저장했습니다." : "Google Drive에 저장했습니다."
+      });
+    } catch (error) {
+      setDriveSyncStatus((current) => ({
+        state: "error",
+        lastSyncedAt: current.lastSyncedAt,
+        message: error instanceof Error ? error.message : "Google Drive 저장에 실패했습니다."
+      }));
+    }
+  }
+
+  async function handleDriveDownload(options: { silentWhenEmpty?: boolean } = {}) {
+    if (!hasGoogleDriveToken()) {
+      window.alert(appLanguage === "ko" ? "먼저 Google Drive에 연결해 주세요." : "Connect Google Drive first.");
+      return;
+    }
+
+    setDriveSyncStatus((current) => ({ ...current, state: "syncing", message: "Google Drive 데이터를 확인하는 중입니다." }));
+    try {
+      const result = await downloadGoogleDriveBackup();
+      if (!result) {
+        hasCompletedInitialDriveCheck.current = true;
+        setDriveSyncStatus((current) => ({
+          state: "idle",
+          lastSyncedAt: current.lastSyncedAt,
+          message: "Drive 데이터가 없어 현재 기기 데이터를 기준으로 시작합니다."
+        }));
+        return;
+      }
+
+      const confirmed = window.confirm(
+        options.silentWhenEmpty
+          ? "Google Drive에 저장된 데이터가 있습니다. 이 기기로 불러올까요?"
+          : `Google Drive 데이터(${formatBackupDate(result.backup.updatedAt)})를 이 기기로 불러올까요?\n현재 로컬 데이터는 자동 복구 지점으로 저장됩니다.`
+      );
+      if (!confirmed) {
+        hasCompletedInitialDriveCheck.current = true;
+        setDriveSyncStatus({
+          state: "idle",
+          lastSyncedAt: result.backup.updatedAt,
+          message: "Drive 데이터 불러오기를 건너뛰었습니다."
+        });
+        return;
+      }
+
+      setLocalRecoveryCreatedAt(saveLocalRecovery("restore"));
+      restoreGoogleDriveBackup(result.backup);
+      hasCompletedInitialDriveCheck.current = true;
+      window.alert("Google Drive 데이터를 불러왔습니다. 앱을 다시 불러옵니다.");
+      window.location.reload();
+    } catch (error) {
+      setDriveSyncStatus((current) => ({
+        state: "error",
+        lastSyncedAt: current.lastSyncedAt,
+        message: error instanceof Error ? error.message : "Google Drive 불러오기에 실패했습니다."
+      }));
+    }
+  }
+
+  function handleDriveDisconnect() {
+    disconnectGoogleDrive();
+    hasCompletedInitialDriveCheck.current = false;
+    setDriveSyncStatus({
+      state: googleClientId.trim() ? "signed_out" : "not_configured",
+      lastSyncedAt: driveSyncStatus.lastSyncedAt,
+      message: "Google Drive 연결을 해제했습니다."
+    });
   }
 
   return (
@@ -607,7 +741,7 @@ export function TodayView() {
       </header>
 
       <nav className={styles.tabs} aria-label={appLanguage === "ko" ? "주요 화면" : "Main screens"}>
-        {tabs.map((tab) => (
+        {visibleTabs.map((tab) => (
           <button
             key={tab}
             type="button"
@@ -624,6 +758,7 @@ export function TodayView() {
           selectedDate={selectedDate}
           language={appLanguage}
           isActive={activeTab === "plan"}
+          onDateChange={setSelectedDate}
       />
 
       {activeTab === "tasks" && (
@@ -631,7 +766,7 @@ export function TodayView() {
           todayTasks={todayTasks}
           editingTask={editingTask}
           activeCreatePanel={activeCreatePanel}
-          activeReminderTasks={activeReminderTasks}
+          activeReminderTasks={usesNativeNotifications ? [] : activeReminderTasks}
           fixedTaskTags={fixedTaskTags}
           language={appLanguage}
           selectedDate={selectedDate}
@@ -665,7 +800,7 @@ export function TodayView() {
           onOpenTasks={() => setActiveTab("tasks")}
         />
       )}
-      {hasOpenedWords && (
+      {enabledFeatures.words && hasOpenedWords && (
         <Suspense
           fallback={
             activeTab === "words" ? (
@@ -684,12 +819,12 @@ export function TodayView() {
           />
         </Suspense>
       )}
-      {hasOpenedPomodoro && (
+      {enabledFeatures.pomodoro && hasOpenedPomodoro && (
         <Suspense fallback={activeTab === "pomodoro" ? <LazyTabFallback language={appLanguage} /> : null}>
           <PomodoroTab tasks={todayTasks} selectedDate={selectedDate} isActive={activeTab === "pomodoro"} language={appLanguage} />
         </Suspense>
       )}
-      {hasOpenedMemo && (
+      {enabledFeatures.memo && hasOpenedMemo && (
         <Suspense fallback={activeTab === "memo" ? <LazyTabFallback language={appLanguage} /> : null}>
           <MemoTab isActive={activeTab === "memo"} language={appLanguage} />
         </Suspense>
@@ -698,15 +833,17 @@ export function TodayView() {
         <SettingsTab
           language={appLanguage}
           fontMode={fontMode}
-          isDriveConnected={isDriveConnected}
-          driveRecoveryCreatedAt={driveRecoveryCreatedAt}
+          enabledFeatures={enabledFeatures}
           localRecoveryCreatedAt={localRecoveryCreatedAt}
-          driveConflictAt={driveConflictAt}
-          authMessage={authMessage}
           onLanguageChange={setAppLanguage}
           onFontModeChange={setFontMode}
+          onFeatureChange={(feature, enabled) =>
+            setEnabledFeatures((current) => ({ ...current, [feature]: enabled }))
+          }
           notificationPermission={notificationPermission}
+          usesNativeNotifications={usesNativeNotifications}
           onNotificationRequest={handleNotificationRequest}
+          onNotificationTest={handleNotificationTest}
           onBackup={() => backupAppData(tasks, schedules)}
           onRestore={(file) =>
             void restoreAppData(file, appLanguage, (createdAt) => setLocalRecoveryCreatedAt(createdAt))
@@ -719,11 +856,14 @@ export function TodayView() {
               setDataResetToken((current) => current + 1);
             })
           }
-          onGoogleDrive={handleGoogleDrive}
-          onDriveSync={handleDriveSync}
-          onDriveRecovery={handleDriveRecovery}
           onLocalRecovery={handleLocalRecovery}
-          onDriveConflict={handleDriveConflict}
+          googleClientId={googleClientId}
+          driveSyncStatus={driveSyncStatus}
+          onGoogleClientIdChange={setGoogleClientId}
+          onDriveConnect={() => void handleDriveConnect()}
+          onDriveUpload={() => void handleDriveUpload("manual")}
+          onDriveDownload={() => void handleDriveDownload()}
+          onDriveDisconnect={handleDriveDisconnect}
           installState={installState}
           installReadiness={installReadiness}
           onInstallApp={handleInstallApp}
@@ -779,46 +919,52 @@ function RecordItem({ label, value }: { label: string; value: string }) {
 function SettingsTab({
   language,
   fontMode,
-  isDriveConnected,
-  driveRecoveryCreatedAt,
+  enabledFeatures,
   localRecoveryCreatedAt,
-  driveConflictAt,
-  authMessage,
   onLanguageChange,
   onFontModeChange,
+  onFeatureChange,
   notificationPermission,
+  usesNativeNotifications,
   onNotificationRequest,
+  onNotificationTest,
   onBackup,
   onRestore,
   onDeleteData,
-  onGoogleDrive,
-  onDriveSync,
-  onDriveRecovery,
   onLocalRecovery,
-  onDriveConflict,
+  googleClientId,
+  driveSyncStatus,
+  onGoogleClientIdChange,
+  onDriveConnect,
+  onDriveUpload,
+  onDriveDownload,
+  onDriveDisconnect,
   installState,
   installReadiness,
   onInstallApp
 }: {
   language: AppLanguage;
   fontMode: FontMode;
-  isDriveConnected: boolean;
-  driveRecoveryCreatedAt: string | null;
+  enabledFeatures: OptionalFeatureSettings;
   localRecoveryCreatedAt: string | null;
-  driveConflictAt: string | null;
-  authMessage: string;
   onLanguageChange: (language: AppLanguage) => void;
   onFontModeChange: (fontMode: FontMode) => void;
+  onFeatureChange: (feature: OptionalFeature, enabled: boolean) => void;
   notificationPermission: ReminderPermission;
+  usesNativeNotifications: boolean;
   onNotificationRequest: () => void;
+  onNotificationTest: () => void;
   onBackup: () => void;
   onRestore: (file: File) => void;
   onDeleteData: () => void;
-  onGoogleDrive: () => void;
-  onDriveSync: () => void;
-  onDriveRecovery: () => void;
   onLocalRecovery: () => void;
-  onDriveConflict: (choice: "remote" | "local") => void;
+  googleClientId: string;
+  driveSyncStatus: DriveSyncStatus;
+  onGoogleClientIdChange: (clientId: string) => void;
+  onDriveConnect: () => void;
+  onDriveUpload: () => void;
+  onDriveDownload: () => void;
+  onDriveDisconnect: () => void;
   installState: InstallState;
   installReadiness: InstallReadiness | null;
   onInstallApp: () => void;
@@ -849,6 +995,46 @@ function SettingsTab({
 
         <section className={styles.settingsGroup}>
           <div>
+            <h3>{language === "ko" ? "Google Drive 동기화" : "Google Drive Sync"}</h3>
+            <p>
+              {language === "ko"
+                ? "같은 Google 계정의 Drive appDataFolder에 앱 데이터를 저장합니다. 연결 후에는 변경사항이 자동 저장됩니다."
+                : "Save app data to this Google account's Drive appDataFolder. Changes auto-save after connecting."}
+            </p>
+            <span className={styles.syncScope}>
+              {driveSyncStatus.message}
+              {driveSyncStatus.lastSyncedAt ? ` · ${formatBackupDate(driveSyncStatus.lastSyncedAt)}` : ""}
+            </span>
+          </div>
+          <div className={styles.driveSyncControls}>
+            <label className={styles.formRow}>
+              <span>{language === "ko" ? "OAuth Client ID" : "OAuth Client ID"}</span>
+              <input
+                value={googleClientId}
+                onChange={(event) => onGoogleClientIdChange(event.target.value)}
+                placeholder="1234567890-xxxx.apps.googleusercontent.com"
+                autoComplete="off"
+              />
+            </label>
+            <div className={styles.settingsActionGroup}>
+              <button type="button" className={styles.settingsAction} onClick={onDriveConnect} disabled={driveSyncStatus.state === "signing_in" || driveSyncStatus.state === "syncing"}>
+                {language === "ko" ? "Drive 연결" : "Connect Drive"}
+              </button>
+              <button type="button" className={styles.settingsAction} onClick={onDriveUpload} disabled={driveSyncStatus.state === "not_configured" || driveSyncStatus.state === "signed_out" || driveSyncStatus.state === "syncing"}>
+                {language === "ko" ? "지금 저장" : "Save Now"}
+              </button>
+              <button type="button" className={styles.settingsAction} onClick={onDriveDownload} disabled={driveSyncStatus.state === "not_configured" || driveSyncStatus.state === "signed_out" || driveSyncStatus.state === "syncing"}>
+                {language === "ko" ? "Drive에서 불러오기" : "Load from Drive"}
+              </button>
+              <button type="button" className={`${styles.settingsAction} ${styles.dangerAction}`} onClick={onDriveDisconnect} disabled={driveSyncStatus.state === "not_configured" || driveSyncStatus.state === "signed_out"}>
+                {language === "ko" ? "연결 해제" : "Disconnect"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className={styles.settingsGroup}>
+          <div>
             <h3>{language === "ko" ? "언어" : "Language"}</h3>
             <p>{language === "ko" ? "앱의 주요 표시 언어를 바꿉니다." : "Change the main display language."}</p>
           </div>
@@ -864,8 +1050,40 @@ function SettingsTab({
 
         <section className={styles.settingsGroup}>
           <div>
+            <h3>{language === "ko" ? "메뉴 기능" : "Menu Features"}</h3>
+            <p>
+              {language === "ko"
+                ? "사용하지 않는 기능은 상단 메뉴에서 숨깁니다. 저장된 기록은 삭제되지 않습니다."
+                : "Hide features you do not use from the top menu. Existing data is not deleted."}
+            </p>
+          </div>
+          <div className={styles.featureToggleList}>
+            {([
+              ["words", language === "ko" ? "단어 학습" : "Word Study"],
+              ["pomodoro", language === "ko" ? "타이머" : "Timer"],
+              ["memo", language === "ko" ? "메모" : "Memo"]
+            ] as Array<[OptionalFeature, string]>).map(([feature, label]) => (
+              <label key={feature} className={styles.featureToggle}>
+                <span>{label}</span>
+                <input
+                  type="checkbox"
+                  checked={enabledFeatures[feature]}
+                  onChange={(event) => onFeatureChange(feature, event.target.checked)}
+                />
+                <i aria-hidden="true" />
+              </label>
+            ))}
+          </div>
+        </section>
+
+        <section className={styles.settingsGroup}>
+          <div>
             <h3>{language === "ko" ? "데이터" : "Data"}</h3>
-            <p>{language === "ko" ? "현재 로컬 데이터와 앱 설정을 JSON 파일로 저장합니다." : "Save current local data and settings as a JSON file."}</p>
+            <p>
+              {language === "ko"
+                ? "데이터는 이 기기의 브라우저에만 저장됩니다. 기기 변경이나 브라우저 초기화에 대비해 JSON 백업을 보관하세요."
+                : "Data stays in this browser on this device. Keep a JSON backup before changing devices or clearing browser data."}
+            </p>
           </div>
           <div className={styles.settingsActionGroup}>
             <button type="button" className={styles.settingsAction} onClick={onBackup}>
@@ -902,18 +1120,28 @@ function SettingsTab({
             <h3>{language === "ko" ? "알림" : "Notifications"}</h3>
             <p>
               {language === "ko"
-                ? getNotificationStatusLabel(notificationPermission)
-                : getNotificationStatusLabelEn(notificationPermission)}
+                ? getNotificationStatusLabel(notificationPermission, usesNativeNotifications)
+                : getNotificationStatusLabelEn(notificationPermission, usesNativeNotifications)}
             </p>
           </div>
-          <button
-            type="button"
-            className={styles.settingsAction}
-            onClick={onNotificationRequest}
-            disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}
-          >
-            {language === "ko" ? "브라우저 알림 켜기" : "Enable Browser Notifications"}
-          </button>
+          <div className={styles.settingsButtonGroup}>
+            <button
+              type="button"
+              className={styles.settingsAction}
+              onClick={onNotificationRequest}
+              disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}
+            >
+              {language === "ko" ? "시스템 알림 켜기" : "Enable System Notifications"}
+            </button>
+            <button
+              type="button"
+              className={styles.settingsAction}
+              onClick={onNotificationTest}
+              disabled={notificationPermission !== "granted"}
+            >
+              {language === "ko" ? "알림 시험하기" : "Test Notification"}
+            </button>
+          </div>
         </section>
 
         <section className={styles.settingsGroup}>
@@ -933,66 +1161,13 @@ function SettingsTab({
           </button>
         </section>
 
-        <section className={styles.settingsGroup}>
-          <div>
-            <h3>Google Drive</h3>
-            <p>{getAuthMessageLabel(authMessage, language)}</p>
-            <span className={styles.syncScope}>
-              {language === "ko"
-                ? "앱 전용 숨김 폴더에 저장되며 각 사용자의 Google Drive 용량을 사용합니다."
-                : "Data is stored in a private app folder using each user's own Google Drive storage."}
-            </span>
-            {driveRecoveryCreatedAt && (
-              <span className={styles.syncScope}>
-                {language === "ko"
-                  ? `Drive 연결 전 복구본 · ${formatBackupDate(driveRecoveryCreatedAt)}`
-                  : `Pre-Drive recovery · ${formatBackupDate(driveRecoveryCreatedAt)}`}
-              </span>
-            )}
-            {driveConflictAt && (
-              <span className={styles.driveConflictNotice}>
-                {language === "ko"
-                  ? `Drive 백업 ${formatBackupDate(driveConflictAt)} · 어느 데이터를 유지할지 선택하세요.`
-                  : `Drive backup ${formatBackupDate(driveConflictAt)} · Choose which data to keep.`}
-              </span>
-            )}
-          </div>
-          <div className={styles.settingsActionGroup}>
-            {driveConflictAt && (
-              <>
-                <button type="button" className={styles.settingsAction} onClick={() => onDriveConflict("remote")}>
-                  {language === "ko" ? "Drive 데이터 사용" : "Use Drive Data"}
-                </button>
-                <button type="button" className={styles.settingsAction} onClick={() => onDriveConflict("local")}>
-                  {language === "ko" ? "현재 데이터 유지" : "Keep Current Data"}
-                </button>
-              </>
-            )}
-            {driveRecoveryCreatedAt && (
-              <button type="button" className={styles.settingsAction} onClick={onDriveRecovery}>
-                {language === "ko" ? "연결 전 데이터로 복구" : "Restore Pre-Drive Data"}
-              </button>
-            )}
-            {isDriveConnected && (
-              <button type="button" className={styles.settingsAction} onClick={onDriveSync}>
-                {language === "ko" ? "지금 동기화" : "Sync Now"}
-              </button>
-            )}
-            <button type="button" className={styles.settingsAction} onClick={onGoogleDrive} disabled={Boolean(driveConflictAt)}>
-              {isDriveConnected
-                ? language === "ko" ? "Drive 연결 해제" : "Disconnect Drive"
-                : language === "ko" ? "내 Google Drive 연결" : "Connect My Google Drive"}
-            </button>
-          </div>
-        </section>
-
         <section className={`${styles.settingsGroup} ${styles.helpGroup}`}>
           <div>
             <h3>{language === "ko" ? "도움말" : "Help"}</h3>
             {language === "ko" ? (
               <ul>
                 <li>잊지 마는 생활 루틴, 할일, 일정, 단어 학습과 타이머를 한 흐름에서 관리하는 실행 관리 앱입니다.</li>
-                <li>설정: 앱 표시 방식, 계정, 백업, 데이터 삭제를 관리합니다.</li>
+                <li>설정: 앱 표시 방식, 로컬 백업, 데이터 삭제를 관리합니다.</li>
                 <li>계획표: 생활 루틴과 시간 있는 할일을 한 시간표에서 봅니다.</li>
                 <li>할일: 오늘 처리할 일을 관리하고, 일정은 읽기용으로 함께 확인합니다.</li>
                 <li>일정 등록: 날짜 일정, 기간 일정, D-day를 별도 일정 데이터로 저장합니다.</li>
@@ -1003,7 +1178,7 @@ function SettingsTab({
             ) : (
               <ul>
                 <li>Don&apos;t Forget manages routines, tasks, schedules, vocabulary, and timers in one flow.</li>
-                <li>Settings: Manage display, account, backup, and data deletion.</li>
+                <li>Settings: Manage display, local backups, and data deletion.</li>
                 <li>Planner: View routines and timed tasks in one schedule.</li>
                 <li>Tasks: Manage today&apos;s tasks and review schedule entries as read-only items.</li>
                 <li>Schedule entry: Date events, period events, and D-days are stored separately from tasks.</li>
@@ -1023,12 +1198,14 @@ function PlanTab({
   tasks,
   selectedDate,
   language,
-  isActive
+  isActive,
+  onDateChange
 }: {
   tasks: Task[];
   selectedDate: string;
   language: AppLanguage;
   isActive: boolean;
+  onDateChange: (date: string) => void;
 }) {
   const [planBlocks, setPlanBlocks] = useState<PlanBlock[]>(() => loadStoredPlanBlocks());
   const [isAddingRoutine, setIsAddingRoutine] = useState(false);
@@ -1064,6 +1241,10 @@ function PlanTab({
     saveStoredPlanBlocks(planBlocks);
   }, [planBlocks]);
 
+  useEffect(() => {
+    if (endTime < startTime) setEndTime(keepEndAtOrAfterStart(startTime, endTime));
+  }, [startTime, endTime]);
+
   function addPlanBlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedTitle = title.trim();
@@ -1075,7 +1256,7 @@ function PlanTab({
         id: `plan-${Date.now()}`,
         title: trimmedTitle,
         startTime,
-        endTime: endTime >= startTime ? endTime : startTime,
+        endTime: keepEndAtOrAfterStart(startTime, endTime),
         kind: "life",
         taskId: null
       }
@@ -1088,18 +1269,48 @@ function PlanTab({
     setPlanBlocks((current) => current.filter((block) => block.id !== blockId));
   }
 
+  function toggleRoutineForm() {
+    setIsAddingRoutine((current) => {
+      const next = !current;
+      if (next) {
+        setTitle("");
+        setStartTime("09:00");
+        setEndTime("09:30");
+      }
+      return next;
+    });
+  }
+
+  function handleRoutineStartChange(nextStartTime: string) {
+    setStartTime(nextStartTime);
+    if (endTime < nextStartTime) setEndTime(nextStartTime);
+  }
+
   return (
     <section className={styles.mainPanel} hidden={!isActive}>
       <div className={styles.sectionHeader}>
         <div>
-          <h2>{formatDateHeading(selectedDate, language)} {language === "ko" ? "계획표" : "Planner"}</h2>
+          <div className={styles.titleNav} aria-label={language === "ko" ? "날짜 이동" : "Date navigation"}>
+            <button type="button" aria-label={language === "ko" ? "이전 날짜" : "Previous date"} onClick={() => onDateChange(shiftDate(selectedDate, -1))}>
+              &lt;
+            </button>
+            <h2>{formatDateHeading(selectedDate, language)} {language === "ko" ? "계획표" : "Planner"}</h2>
+            <button type="button" aria-label={language === "ko" ? "다음 날짜" : "Next date"} onClick={() => onDateChange(shiftDate(selectedDate, 1))}>
+              &gt;
+            </button>
+            {selectedDate !== getLocalDateKey() && (
+              <button type="button" className={styles.todayNavButton} onClick={() => onDateChange(getLocalDateKey())}>
+                {language === "ko" ? "오늘" : "Today"}
+              </button>
+            )}
+          </div>
         </div>
         <div className={styles.headerActions}>
           <span className={styles.headerMeta}>{language === "ko" ? `${timelineItems.length}개` : `${timelineItems.length} items`}</span>
           <button
             type="button"
             className={isAddingRoutine ? `${styles.addInlineButton} ${styles.activeInlineButton}` : styles.addInlineButton}
-            onClick={() => setIsAddingRoutine((current) => !current)}
+            onClick={toggleRoutineForm}
           >
             {isAddingRoutine ? (language === "ko" ? "추가 닫기" : "Close") : language === "ko" ? "루틴 추가" : "Add Routine"}
           </button>
@@ -1111,7 +1322,7 @@ function PlanTab({
           <div className={styles.formGrid}>
             <label className={styles.formRow}>
               <span>{language === "ko" ? "시작" : "Start"}</span>
-              <input type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} />
+              <input type="time" value={startTime} onChange={(event) => handleRoutineStartChange(event.target.value)} />
             </label>
             <label className={styles.formRow}>
               <span>{language === "ko" ? "종료" : "End"}</span>
@@ -1320,11 +1531,12 @@ function TasksTab({
                   onToggleDone={onToggleDone}
                   isEditing={editingTask?.id === task.id}
                 />
-                {editingTask?.id === task.id && !isSchedulerOwnedTask(task) && (
+                {editingTask?.id === task.id && (
                   <TaskEditor
                     task={editingTask}
                     selectedDate={selectedDate}
                     language={language}
+                    onAddTask={onAddTask}
                     onSaveTask={onSaveTask}
                     onDeleteTask={onDeleteTask}
                   />
@@ -1458,6 +1670,8 @@ function TaskRow({
   const isCancelled = task.status === "cancelled";
   const isDone = isTaskDoneOnDate(task, selectedDate);
   const isSchedulerOwned = isSchedulerOwnedTask(task);
+  const hasPartialProgress = task.progressPercent > 0 && task.progressPercent < 100;
+  const hasRemainingOnly = task.progressPercent === 0 && task.remainingPercent > 0 && task.remainingPercent < 100;
 
   return (
     <article className={`${styles.taskRow} ${isDone ? styles.done : styles[task.status]}`} aria-disabled={isCancelled}>
@@ -1476,13 +1690,12 @@ function TaskRow({
           {isSchedulerOwned && <span className={styles.scheduleTag}>{language === "ko" ? "일정" : "Schedule"}</span>}
           {isRepeatTask(task) && <span className={styles.repeatTag}>{language === "ko" ? "반복" : "Repeat"}</span>}
           {task.dueDate && <span className={getDeadlineClass(selectedDate, task.dueDate)}>{formatDday(selectedDate, task.dueDate)}</span>}
-          {task.remainingPercent < 100 && <span>{language === "ko" ? `잔여 ${task.remainingPercent}%` : `${task.remainingPercent}% left`}</span>}
+          {hasPartialProgress && <span>{language === "ko" ? `진행 ${task.progressPercent}%` : `${task.progressPercent}% done`}</span>}
+          {hasRemainingOnly && <span>{language === "ko" ? `잔여 ${task.remainingPercent}%` : `${task.remainingPercent}% left`}</span>}
         </div>
         <h3>{task.title}</h3>
       </div>
-      {isSchedulerOwned ? (
-        <span className={styles.readonlyLabel}>{language === "ko" ? "스케줄러" : "Read-only"}</span>
-      ) : (
+      {(
         <button className={styles.editButton} type="button" onClick={() => onEdit(task.id)}>
           {isEditing ? (language === "ko" ? "닫기" : "Close") : language === "ko" ? "수정" : "Edit"}
         </button>
@@ -1495,11 +1708,13 @@ type TaskEditorProps = {
   task: Task;
   selectedDate: string;
   language: AppLanguage;
+  onAddTask: (task: Task) => void;
   onSaveTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
 };
 
-function TaskEditor({ task, selectedDate, language, onSaveTask, onDeleteTask }: TaskEditorProps) {
+function TaskEditor({ task, selectedDate, language, onAddTask, onSaveTask, onDeleteTask }: TaskEditorProps) {
+  const isScheduleProgressOnly = task.owner === "schedule";
   const initialKind = getTaskKindOption(task);
   const [title, setTitle] = useState(task.title);
   const [taskKind, setTaskKind] = useState<TaskKindOption>(initialKind);
@@ -1514,11 +1729,16 @@ function TaskEditor({ task, selectedDate, language, onSaveTask, onDeleteTask }: 
   const [memo, setMemo] = useState(task.memo);
   const [status, setStatus] = useState<TaskStatus>(task.status);
   const [progress, setProgress] = useState(task.progressPercent);
+  const [carryOverDate, setCarryOverDate] = useState(shiftDate(selectedDate, 1));
   const [isFixed, setIsFixed] = useState(Boolean(task.isFixed));
   const [calendarColor, setCalendarColor] = useState(task.calendarColor ?? repeatCalendarColors[0]);
 
+  useEffect(() => {
+    if (periodEndDate && periodEndDate < periodStartDate) setPeriodEndDate(periodStartDate);
+  }, [periodStartDate, periodEndDate]);
+
   function changeProgress(next: number) {
-    setProgress(Math.min(100, Math.max(0, next)));
+    setProgress(Math.min(100, Math.max(0, Number.isFinite(next) ? next : 0)));
   }
 
   function handleKindChange(nextKind: TaskKindOption) {
@@ -1529,44 +1749,88 @@ function TaskEditor({ task, selectedDate, language, onSaveTask, onDeleteTask }: 
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const normalized = normalizeScheduleFields(taskKind, {
-      selectedDate,
-      date,
-      time,
-      dueDate,
-      periodStartDate,
-      periodEndDate,
-      repeatKind,
-      repeatDaysOfWeek,
-      repeatDayOfMonth,
-      calendarColor
-    });
-    const clampedProgress = Math.min(100, Math.max(0, progress));
+    const normalized = isScheduleProgressOnly
+      ? null
+      : normalizeScheduleFields(taskKind, {
+          selectedDate,
+          date,
+          time,
+          dueDate,
+          periodStartDate,
+          periodEndDate,
+          repeatKind,
+          repeatDaysOfWeek,
+          repeatDayOfMonth,
+          calendarColor
+        });
+    const rawProgress = progress;
+    const nextProgress = Math.min(100, Math.max(0, Math.round(rawProgress / 10) * 10));
+    const nextStatus = nextProgress === 100 ? "done" : nextProgress > 0 ? "started" : status === "done" ? "planned" : status;
+    const nextRemaining = 100 - nextProgress;
 
     onSaveTask({
       ...task,
       title: title.trim() || task.title,
-      date: normalized.date,
-      dueDate: normalized.dueDate,
-      periodStartDate: normalized.periodStartDate,
-      periodEndDate: normalized.periodEndDate,
-      time: normalized.time,
-      source: normalized.source,
-      todaySortGroup: normalized.todaySortGroup,
-      taskKindOption: taskKind,
-      owner: normalized.owner,
-      status,
-      progressPercent: clampedProgress,
-      remainingPercent: 100 - clampedProgress,
+      date: normalized?.date ?? task.date,
+      dueDate: normalized?.dueDate ?? task.dueDate,
+      periodStartDate: normalized?.periodStartDate ?? task.periodStartDate,
+      periodEndDate: normalized?.periodEndDate ?? task.periodEndDate,
+      time: normalized?.time ?? task.time,
+      source: normalized?.source ?? task.source,
+      todaySortGroup: normalized?.todaySortGroup ?? task.todaySortGroup,
+      taskKindOption: isScheduleProgressOnly ? task.taskKindOption : taskKind,
+      owner: normalized?.owner ?? task.owner,
+      status: nextStatus,
+      progressPercent: nextProgress,
+      remainingPercent: nextRemaining,
       isFixed,
-      calendarColor: normalized.calendarColor,
-      repeatKind: normalized.repeatKind,
-      repeatDaysOfWeek: normalized.repeatDaysOfWeek,
-      repeatDayOfMonth: normalized.repeatDayOfMonth,
-      isGenerated: normalized.repeatKind !== "none",
+      calendarColor: normalized?.calendarColor ?? task.calendarColor,
+      repeatKind: normalized?.repeatKind ?? task.repeatKind,
+      repeatDaysOfWeek: normalized?.repeatDaysOfWeek ?? task.repeatDaysOfWeek,
+      repeatDayOfMonth: normalized?.repeatDayOfMonth ?? task.repeatDayOfMonth,
+      isGenerated: normalized ? normalized.repeatKind !== "none" : task.isGenerated,
       isManuallyEdited: true,
       memo: memo.trim()
     });
+
+    if (!isScheduleProgressOnly && nextProgress > 0 && nextProgress < 100 && carryOverDate) {
+      onAddTask({
+        ...task,
+        id: `task-${Date.now()}`,
+        title: title.trim() || task.title,
+        date: carryOverDate,
+        dueDate: null,
+        periodStartDate: null,
+        periodEndDate: null,
+        time: null,
+        source: "manual",
+        status: "planned",
+        priority: task.priority,
+        todaySortGroup: "pulled_to_today",
+        taskKindOption: "today",
+        owner: "task",
+        postponeCount: 0,
+        progressPercent: 0,
+        remainingPercent: nextRemaining,
+        reminderAt: null,
+        parentTaskId: task.id,
+        scheduleId: null,
+        isFixed: false,
+        calendarColor: undefined,
+        routineId: null,
+        routineRuleId: null,
+        repeatKind: "none",
+        repeatDaysOfWeek: [],
+        repeatDayOfMonth: null,
+        completedDates: [],
+        completedAt: null,
+        postponedAt: null,
+        cancelledAt: null,
+        isGenerated: false,
+        isManuallyEdited: false,
+        memo: memo.trim()
+      });
+    }
   }
 
   return (
@@ -1578,64 +1842,77 @@ function TaskEditor({ task, selectedDate, language, onSaveTask, onDeleteTask }: 
         </div>
       </div>
 
-      <label className={styles.formRow}>
-        <span>{language === "ko" ? "할일" : "Task"}</span>
-        <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} />
-      </label>
+      {isScheduleProgressOnly ? (
+        <div className={styles.readOnlyScheduleBox}>
+          <strong>{title}</strong>
+          <span>
+            {language === "ko"
+              ? "일정 원본은 달력에서 수정하고, 여기서는 오늘 진행률만 저장합니다."
+              : "Edit the schedule in Calendar. This panel only saves today's progress."}
+          </span>
+        </div>
+      ) : (
+        <>
+          <label className={styles.formRow}>
+            <span>{language === "ko" ? "할일" : "Task"}</span>
+            <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} />
+          </label>
 
-      <label className={styles.checkboxRow}>
-        <input type="checkbox" checked={isFixed} onChange={(event) => setIsFixed(event.target.checked)} />
-        {language === "ko" ? "고정 할일로 등록" : "Save as reusable task"}
-      </label>
+          <label className={styles.checkboxRow}>
+            <input type="checkbox" checked={isFixed} onChange={(event) => setIsFixed(event.target.checked)} />
+            {language === "ko" ? "고정 할일로 등록" : "Save as reusable task"}
+          </label>
 
-      <TaskKindFields
-        language={language}
-        taskKind={taskKind}
-        date={date}
-        time={time}
-        dueDate={dueDate}
-        periodStartDate={periodStartDate}
-        periodEndDate={periodEndDate}
-        repeatKind={repeatKind}
-        repeatDaysOfWeek={repeatDaysOfWeek}
-        repeatDayOfMonth={repeatDayOfMonth}
-        calendarColor={calendarColor}
-        onTaskKindChange={handleKindChange}
-        onDateChange={setDate}
-        onTimeChange={setTime}
-        onDueDateChange={setDueDate}
-        onPeriodStartDateChange={setPeriodStartDate}
-        onPeriodEndDateChange={setPeriodEndDate}
-        onRepeatKindChange={setRepeatKind}
-        onRepeatDaysChange={setRepeatDaysOfWeek}
-        onRepeatDayOfMonthChange={setRepeatDayOfMonth}
-        onCalendarColorChange={setCalendarColor}
-      />
+          <TaskKindFields
+            language={language}
+            taskKind={taskKind}
+            date={date}
+            time={time}
+            dueDate={dueDate}
+            periodStartDate={periodStartDate}
+            periodEndDate={periodEndDate}
+            repeatKind={repeatKind}
+            repeatDaysOfWeek={repeatDaysOfWeek}
+            repeatDayOfMonth={repeatDayOfMonth}
+            calendarColor={calendarColor}
+            onTaskKindChange={handleKindChange}
+            onDateChange={setDate}
+            onTimeChange={setTime}
+            onDueDateChange={setDueDate}
+            onPeriodStartDateChange={setPeriodStartDate}
+            onPeriodEndDateChange={setPeriodEndDate}
+            onRepeatKindChange={setRepeatKind}
+            onRepeatDaysChange={setRepeatDaysOfWeek}
+            onRepeatDayOfMonthChange={setRepeatDayOfMonth}
+            onCalendarColorChange={setCalendarColor}
+          />
 
-      <label className={styles.formRow}>
-        <span>{language === "ko" ? "상태" : "Status"}</span>
-        <select value={status} onChange={(event) => setStatus(event.target.value as TaskStatus)}>
-          <option value="planned">{language === "ko" ? "계획" : "Planned"}</option>
-          <option value="started">{language === "ko" ? "진행 중" : "In Progress"}</option>
-          <option value="done">{language === "ko" ? "완료" : "Done"}</option>
-          <option value="postponed">{language === "ko" ? "연기" : "Postponed"}</option>
-          <option value="cancelled">{language === "ko" ? "취소" : "Cancelled"}</option>
-        </select>
-      </label>
+          <label className={styles.formRow}>
+            <span>{language === "ko" ? "상태" : "Status"}</span>
+            <select value={status} onChange={(event) => setStatus(event.target.value as TaskStatus)}>
+              <option value="planned">{language === "ko" ? "계획" : "Planned"}</option>
+              <option value="started">{language === "ko" ? "진행 중" : "In Progress"}</option>
+              <option value="done">{language === "ko" ? "완료" : "Done"}</option>
+              <option value="postponed">{language === "ko" ? "연기" : "Postponed"}</option>
+              <option value="cancelled">{language === "ko" ? "취소" : "Cancelled"}</option>
+            </select>
+          </label>
 
-      <label className={styles.formRow}>
-        <span>{language === "ko" ? "메모" : "Memo"}</span>
-        <textarea value={memo} onChange={(event) => setMemo(event.target.value)} maxLength={240} />
-      </label>
+          <label className={styles.formRow}>
+            <span>{language === "ko" ? "메모" : "Memo"}</span>
+            <textarea value={memo} onChange={(event) => setMemo(event.target.value)} maxLength={240} />
+          </label>
+        </>
+      )}
 
       <div className={styles.progressBox}>
-        <span>{language === "ko" ? "진행률" : "Progress"}</span>
+        <span>{language === "ko" ? "오늘 진행률" : "Today's Progress"}</span>
         <div className={styles.progressStepper}>
           <button type="button" onClick={() => changeProgress(progress - 10)}>
             -
           </button>
           <input
-            aria-label={language === "ko" ? "진행률" : "Progress"}
+            aria-label={language === "ko" ? "오늘 진행률" : "Today's Progress"}
             type="number"
             min="0"
             max="100"
@@ -1647,12 +1924,20 @@ function TaskEditor({ task, selectedDate, language, onSaveTask, onDeleteTask }: 
             +
           </button>
         </div>
+        {!isScheduleProgressOnly && progress > 0 && progress < 100 && (
+          <label className={styles.formRow}>
+            <span>{language === "ko" ? `남은 ${100 - progress}%를 보낼 날짜` : `Move remaining ${100 - progress}% to`}</span>
+            <input type="date" value={carryOverDate} onChange={(event) => setCarryOverDate(event.target.value)} />
+          </label>
+        )}
       </div>
 
       <div className={styles.editorFooter}>
-        <button type="button" className={styles.deleteButton} onClick={() => onDeleteTask(task.id)}>
-          {language === "ko" ? "삭제" : "Delete"}
-        </button>
+        {!isScheduleProgressOnly && (
+          <button type="button" className={styles.deleteButton} onClick={() => onDeleteTask(task.id)}>
+            {language === "ko" ? "삭제" : "Delete"}
+          </button>
+        )}
         <button type="submit" className={styles.completeButton}>
           {language === "ko" ? "저장" : "Save"}
         </button>
@@ -1685,6 +1970,10 @@ function TaskCreateForm({
   const [memo, setMemo] = useState("");
   const [isFixed, setIsFixed] = useState(false);
   const [calendarColor, setCalendarColor] = useState(repeatCalendarColors[0]);
+
+  useEffect(() => {
+    if (periodEndDate && periodEndDate < periodStartDate) setPeriodEndDate(periodStartDate);
+  }, [periodStartDate, periodEndDate]);
 
   function handleKindChange(nextKind: TaskKindOption) {
     setTaskKind(nextKind);
@@ -1832,6 +2121,10 @@ function ScheduleCreateForm({
     setEndDate(selectedDate);
   }, [selectedDate]);
 
+  useEffect(() => {
+    if (endDate < date) setEndDate(date);
+  }, [date, endDate]);
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedTitle = title.trim();
@@ -1852,7 +2145,15 @@ function ScheduleCreateForm({
       <div className={styles.formGrid}>
         <label className={styles.formRow}>
           <span>{isDday ? (language === "ko" ? "마감일" : "Due Date") : language === "ko" ? "시작일" : "Start Date"}</span>
-          <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+          <input
+            type="date"
+            value={date}
+            onChange={(event) => {
+              const nextStartDate = event.target.value;
+              setDate(nextStartDate);
+              if (endDate < nextStartDate) setEndDate(nextStartDate);
+            }}
+          />
         </label>
         <label className={styles.formRow}>
           <span>{language === "ko" ? "종료일" : "End Date"}</span>
@@ -1864,7 +2165,14 @@ function ScheduleCreateForm({
         </label>
       </div>
       <label className={styles.checkboxRow}>
-        <input type="checkbox" checked={isDday} onChange={(event) => setIsDday(event.target.checked)} />
+        <input
+          type="checkbox"
+          checked={isDday}
+          onChange={(event) => {
+            setIsDday(event.target.checked);
+            if (event.target.checked) setEndDate(date);
+          }}
+        />
         {language === "ko" ? "D-day로 표시" : "Mark as D-day"}
       </label>
       <button type="submit" className={styles.completeButton}>
@@ -1960,12 +2268,16 @@ function ScheduleEditor({
   const [isDday, setIsDday] = useState(schedule.kind === "deadline");
   const [status, setStatus] = useState(schedule.status);
 
+  useEffect(() => {
+    if (endDate < startDate) setEndDate(startDate);
+  }, [startDate, endDate]);
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedTitle = title.trim();
     if (!trimmedTitle) return;
 
-    const normalizedEndDate = endDate >= startDate ? endDate : startDate;
+    const normalizedEndDate = keepEndAtOrAfterStart(startDate, endDate);
     onSaveSchedule({
       ...schedule,
       title: trimmedTitle,
@@ -1989,7 +2301,15 @@ function ScheduleEditor({
       <div className={styles.formGrid}>
         <label className={styles.formRow}>
           <span>{isDday ? (language === "ko" ? "마감일" : "Due Date") : language === "ko" ? "시작일" : "Start Date"}</span>
-          <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+          <input
+            type="date"
+            value={startDate}
+            onChange={(event) => {
+              const nextStartDate = event.target.value;
+              setStartDate(nextStartDate);
+              if (endDate < nextStartDate) setEndDate(nextStartDate);
+            }}
+          />
         </label>
         <label className={styles.formRow}>
           <span>{language === "ko" ? "종료일" : "End Date"}</span>
@@ -2009,7 +2329,14 @@ function ScheduleEditor({
         </label>
       </div>
       <label className={styles.checkboxRow}>
-        <input type="checkbox" checked={isDday} onChange={(event) => setIsDday(event.target.checked)} />
+        <input
+          type="checkbox"
+          checked={isDday}
+          onChange={(event) => {
+            setIsDday(event.target.checked);
+            if (event.target.checked) setEndDate(startDate);
+          }}
+        />
         {language === "ko" ? "D-day로 표시" : "Mark as D-day"}
       </label>
       <button type="submit" className={styles.completeButton}>
@@ -2117,7 +2444,15 @@ function TaskKindFields({
           <div className={styles.formGrid}>
             <label className={styles.formRow}>
               <span>{language === "ko" ? "진행 기간 시작" : "Period Start"}</span>
-              <input type="date" value={periodStartDate} onChange={(event) => onPeriodStartDateChange(event.target.value)} />
+              <input
+                type="date"
+                value={periodStartDate}
+                onChange={(event) => {
+                  const nextStartDate = event.target.value;
+                  onPeriodStartDateChange(nextStartDate);
+                  if (periodEndDate && periodEndDate < nextStartDate) onPeriodEndDateChange(nextStartDate);
+                }}
+              />
             </label>
             <label className={styles.formRow}>
               <span>{language === "ko" ? "진행 기간 종료" : "Period End"}</span>
@@ -2289,8 +2624,8 @@ function scheduleToTask(schedule: Schedule, date: string): Task | null {
     taskKindOption: schedule.kind === "deadline" ? "dday" : "today",
     owner: "schedule",
     postponeCount: 0,
-    progressPercent: schedule.status === "done" ? 100 : 0,
-    remainingPercent: schedule.status === "done" ? 0 : 100,
+    progressPercent: schedule.progressPercent ?? (schedule.status === "done" ? 100 : 0),
+    remainingPercent: schedule.remainingPercent ?? (schedule.status === "done" ? 0 : 100),
     reminderAt: schedule.reminderAt ?? null,
     parentTaskId: null,
     scheduleId: schedule.id,
@@ -2322,6 +2657,8 @@ function taskToSchedule(task: Task): Schedule {
     time: task.time,
     kind: task.dueDate ? "deadline" : task.periodStartDate && task.periodEndDate && task.periodEndDate !== task.periodStartDate ? "period" : "date",
     status: task.status === "done" ? "done" : task.status === "cancelled" ? "cancelled" : "planned",
+    progressPercent: task.progressPercent,
+    remainingPercent: task.remainingPercent,
     reminderAt: task.reminderAt,
     calendarColor: task.calendarColor ?? (task.dueDate ? fixedKindColors.dday : fixedKindColors.today),
     linkedTaskId: task.id,
@@ -2429,7 +2766,7 @@ function createCalendarSchedule({
   time: string;
   isDday: boolean;
 }): Schedule {
-  const normalizedEndDate = endDate >= startDate ? endDate : startDate;
+  const normalizedEndDate = keepEndAtOrAfterStart(startDate, endDate);
   const isPeriod = !isDday && normalizedEndDate !== startDate;
   const now = new Date().toISOString();
 
@@ -2441,6 +2778,8 @@ function createCalendarSchedule({
     time: time || null,
     kind: isDday ? "deadline" : isPeriod ? "period" : "date",
     status: "planned",
+    progressPercent: 0,
+    remainingPercent: 100,
     reminderAt: null,
     calendarColor: isDday ? fixedKindColors.dday : fixedKindColors.today,
     linkedTaskId: null,
@@ -2518,7 +2857,9 @@ function normalizeScheduleFields(
       date: values.periodStartDate || values.selectedDate,
       dueDate: null,
       periodStartDate: values.periodStartDate || values.selectedDate,
-      periodEndDate: values.periodEndDate || null,
+      periodEndDate: values.periodEndDate
+        ? keepEndAtOrAfterStart(values.periodStartDate || values.selectedDate, values.periodEndDate)
+        : null,
       time: values.time || null,
       source: "routine",
       todaySortGroup: "repeat_today",
@@ -2568,6 +2909,24 @@ function isTaskDoneOnDate(task: Task, date: string) {
   }
 
   return task.status === "done";
+}
+
+function getTaskProgressOnDate(task: Task, date: string) {
+  if (isRepeatTask(task)) return isTaskDoneOnDate(task, date) ? 100 : 0;
+  if (task.status === "cancelled") return 0;
+  if (task.status === "done") return 100;
+  return clampPercent(task.progressPercent);
+}
+
+function getTaskProgressRate(tasks: Task[], date: string) {
+  if (tasks.length === 0) return 0;
+  const totalProgress = tasks.reduce((total, task) => total + getTaskProgressOnDate(task, date), 0);
+  return Math.round(totalProgress / tasks.length);
+}
+
+function clampPercent(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, Math.round(value)));
 }
 
 function normalizeRepeatKind(repeatKind: RepeatKind | undefined) {
@@ -2728,18 +3087,22 @@ function getNotificationPermission(): ReminderPermission {
   return Notification.permission;
 }
 
-function getNotificationStatusLabel(permission: ReminderPermission) {
+function getNotificationStatusLabel(permission: ReminderPermission, native: boolean) {
   if (permission === "unsupported") return "이 브라우저에서는 알림을 사용할 수 없습니다.";
-  if (permission === "granted") return "시간이 있는 할일과 일정은 앱이 열려 있거나 PWA로 실행 중일 때 알림을 보냅니다.";
+  if (native && permission === "granted") return "앱을 닫아도 설정한 시각에 휴대폰 시스템 알림으로 표시합니다.";
+  if (permission === "granted") return "설정한 시각에 시스템 알림으로 표시합니다. 웹앱이 완전히 종료되면 알림은 보장되지 않습니다.";
   if (permission === "denied") return "브라우저에서 알림이 차단되어 있습니다. 브라우저 설정에서 권한을 바꿔야 합니다.";
-  return "시간이 있는 할일과 일정 알림을 받으려면 브라우저 알림 권한을 켜야 합니다.";
+  if (native) return "앱을 닫은 뒤에도 설정한 시각에 알림을 받으려면 권한을 켜야 합니다.";
+  return "설정한 시각에 시스템 알림을 받으려면 권한을 켜야 합니다. 웹앱이 완전히 종료되면 알림은 보장되지 않습니다.";
 }
 
-function getNotificationStatusLabelEn(permission: ReminderPermission) {
+function getNotificationStatusLabelEn(permission: ReminderPermission, native: boolean) {
   if (permission === "unsupported") return "This browser does not support notifications.";
-  if (permission === "granted") return "Timed tasks and schedules notify while the app is open or running as a PWA.";
+  if (native && permission === "granted") return "Timed reminders appear as mobile system notifications even after the app closes.";
+  if (permission === "granted") return "Timed reminders appear as system notifications, but are not guaranteed after the web app fully closes.";
   if (permission === "denied") return "Notifications are blocked. Change permission in your browser settings.";
-  return "Enable browser notifications to receive timed task and schedule reminders.";
+  if (native) return "Enable notifications to receive timed reminders after the app closes.";
+  return "Enable system notifications. Delivery is not guaranteed after the web app fully closes.";
 }
 
 function getInstallStatusLabel(state: InstallState, language: AppLanguage) {
@@ -2811,26 +3174,12 @@ async function checkInstallReadiness(): Promise<InstallReadiness> {
   return readiness;
 }
 
-function getAuthMessageLabel(message: string, language: AppLanguage) {
-  if (language === "ko") return message;
-  if (message === "Google Drive 설정 필요") return "Google Drive setup required.";
-  if (message === "Google Drive 연결 준비됨") return "Google Drive is ready to connect.";
-  if (message.includes("OAuth 클라이언트 ID")) return "Add your Google OAuth client ID to .env.";
-  if (message.includes("연결 중")) return "Connecting to Google Drive.";
-  if (message.includes("동기화 중")) return "Syncing with Google Drive.";
-  if (message.includes("동기화 완료")) return message.replace("Google Drive 동기화 완료", "Google Drive synced");
-  if (message.includes("현재 데이터가 다릅니다")) return "Drive data differs from current data. Choose which data to keep.";
-  if (message.includes("Drive 데이터를 불러오는 중")) return "Loading data from Drive.";
-  if (message.includes("현재 데이터를 Drive에 저장하는 중")) return "Saving current data to Drive.";
-  if (message.includes("Drive 충돌을 해결하지 못했습니다")) return "Could not resolve the Drive data conflict. Please reconnect.";
-  if (message.includes("Drive 데이터를 불러왔습니다")) return "Drive data loaded. Reloading the app.";
-  if (message.includes("복구할 Drive 이전 데이터가 없습니다")) return "No pre-Drive recovery data is available.";
-  if (message.includes("연결이 만료")) return "The Drive connection expired. Please reconnect.";
-  if (message.includes("연결을 완료하지 못했습니다")) return "Could not connect to Google Drive.";
-  return message;
-}
-
-function scheduleBrowserReminders(tasks: Task[], selectedDate: string, firedKeys: Set<string>) {
+function scheduleBrowserReminders(
+  tasks: Task[],
+  selectedDate: string,
+  firedKeys: Set<string>,
+  language: AppLanguage
+) {
   const now = Date.now();
   const maxDelay = 1000 * 60 * 60 * 24;
 
@@ -2848,7 +3197,7 @@ function scheduleBrowserReminders(tasks: Task[], selectedDate: string, firedKeys
 
     const timer = window.setTimeout(() => {
       firedKeys.add(reminderKey);
-      showTaskNotification(task);
+      void showTaskNotification(task, language);
     }, delay);
 
     return [timer];
@@ -2871,27 +3220,37 @@ function getDueReminderTasks(tasks: Task[], selectedDate: string, now: number) {
     });
 }
 
-function getTaskReminderDate(task: Task, selectedDate: string) {
-  if (task.reminderAt) {
-    const reminderDate = new Date(task.reminderAt);
-    return Number.isNaN(reminderDate.getTime()) ? null : reminderDate;
-  }
-
-  if (!task.time) return null;
-
-  const reminderDate = new Date(`${selectedDate}T${task.time}:00`);
-  return Number.isNaN(reminderDate.getTime()) ? null : reminderDate;
-}
-
-function showTaskNotification(task: Task) {
+async function showTaskNotification(task: Task, language: AppLanguage) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
 
-  const notification = new Notification(task.title, {
-    body: "딱 5분만 시작해요.",
-    icon: "./icon.svg",
-    tag: `dont-forget-${task.id}`
-  });
+  await showSystemNotification(
+    language === "ko" ? "잊지 마" : "Don't Forget",
+    task.title,
+    `dont-forget-${task.id}`
+  );
+}
 
+async function showSystemNotification(title: string, body: string, tag: string) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+
+  if ("serviceWorker" in navigator) {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (registration) {
+      await registration.showNotification(title, {
+        body,
+        icon: "/icon-192.svg",
+        badge: "/icon-192.svg",
+        tag
+      });
+      return;
+    }
+  }
+
+  const notification = new Notification(title, {
+    body,
+    icon: "/icon-192.svg",
+    tag
+  });
   notification.onclick = () => {
     window.focus();
     notification.close();
@@ -2931,11 +3290,13 @@ function CalendarTab({
       .filter((task) => task.owner === "schedule" && task.scheduleId)
       .map((task) => [task.scheduleId as string, task])
   );
-  const selectedDoneCount = selectedProgressTasks.filter((task) => isTaskDoneOnDate(task, selectedDate)).length;
+  const selectedDoneCount = selectedProgressTasks.filter((task) => getTaskProgressOnDate(task, selectedDate) === 100).length;
   const selectedTotalCount = selectedProgressTasks.length;
-  const selectedRate = selectedTotalCount === 0 ? 0 : Math.round((selectedDoneCount / selectedTotalCount) * 100);
+  const selectedRate = getTaskProgressRate(selectedProgressTasks, selectedDate);
   const selectedDailyNote = dailyNotes.find((note) => note.date === selectedDate);
   const selectedNote = selectedDailyNote?.text ?? "";
+  const [draftNote, setDraftNote] = useState(selectedNote);
+  const [isEditingNote, setIsEditingNote] = useState(!selectedDailyNote);
   const noteDates = new Set(dailyNotes.map((note) => note.date));
   const monthKey = selectedDate.slice(0, 7);
   const monthlyDailyNotes = dailyNotes
@@ -2948,6 +3309,22 @@ function CalendarTab({
 
   function openDate(date: string) {
     onDateChange(date);
+  }
+
+  useEffect(() => {
+    setDraftNote(selectedNote);
+    setIsEditingNote(!selectedDailyNote);
+  }, [selectedDate, selectedDailyNote, selectedNote]);
+
+  function saveNote() {
+    onSaveDailyNote(selectedDate, draftNote);
+    setIsEditingNote(false);
+  }
+
+  function clearNote() {
+    onSaveDailyNote(selectedDate, "");
+    setDraftNote("");
+    setIsEditingNote(true);
   }
 
   return (
@@ -2974,9 +3351,9 @@ function CalendarTab({
 
           const daySchedules = getCalendarTextSchedules(schedules, day);
           const progressTasks = getCalendarProgressTasks(tasks, schedules, day);
-          const progressDoneCount = progressTasks.filter((task) => isTaskDoneOnDate(task, day)).length;
-          const progressRate = progressTasks.length === 0 ? 0 : Math.round((progressDoneCount / progressTasks.length) * 100);
-          const isDayComplete = progressTasks.length > 0 && progressDoneCount === progressTasks.length;
+          const progressDoneCount = progressTasks.filter((task) => getTaskProgressOnDate(task, day) === 100).length;
+          const progressRate = getTaskProgressRate(progressTasks, day);
+          const isDayComplete = progressTasks.length > 0 && progressRate === 100;
           const isSelected = day === selectedDate;
           const hasDailyNote = noteDates.has(day);
           const date = new Date(`${day}T00:00:00`);
@@ -2987,6 +3364,7 @@ function CalendarTab({
               type="button"
               className={[
                 styles.calendarCell,
+                hasDailyNote ? styles.noteCell : "",
                 isSelected ? styles.selectedCell : "",
                 isDayComplete ? styles.completedCell : ""
               ].join(" ")}
@@ -3025,9 +3403,6 @@ function CalendarTab({
                 <span className={styles.calendarBar} aria-label={language === "ko" ? `진척률 ${progressDoneCount}/${progressTasks.length}` : `Progress ${progressDoneCount}/${progressTasks.length}`}>
                   <i style={{ width: `${progressRate}%` }} />
                 </span>
-              )}
-              {hasDailyNote && (
-                <span className={styles.calendarNoteDot} aria-label={language === "ko" ? "기록 있음" : "Has note"} />
               )}
             </button>
           );
@@ -3106,19 +3481,48 @@ function CalendarTab({
                   : "Capture what happened or what you actually did."}
             </span>
           </div>
-          {selectedDailyNote && (
-            <button type="button" onClick={() => onSaveDailyNote(selectedDate, "")}>
-              {language === "ko" ? "기록 지우기" : "Clear Note"}
-            </button>
-          )}
+          <div className={styles.dailyNoteActions}>
+            {selectedDailyNote && !isEditingNote && (
+              <button type="button" onClick={() => setIsEditingNote(true)}>
+                {language === "ko" ? "수정" : "Edit"}
+              </button>
+            )}
+            {selectedDailyNote && (
+              <button type="button" onClick={clearNote}>
+                {language === "ko" ? "삭제" : "Delete"}
+              </button>
+            )}
+          </div>
         </div>
-        <textarea
-          value={selectedNote}
-          onChange={(event) => onSaveDailyNote(selectedDate, event.target.value)}
-          onInput={(event) => onSaveDailyNote(selectedDate, event.currentTarget.value)}
-          placeholder={language === "ko" ? "예: 산책하고 카페에서 책 읽음. 생각보다 컨디션 좋았음." : "Ex: Took a walk and read at a cafe. Felt better than expected."}
-          rows={3}
-        />
+        {isEditingNote ? (
+          <div className={styles.dailyNoteEditor}>
+            <textarea
+              value={draftNote}
+              onChange={(event) => setDraftNote(event.target.value)}
+              placeholder={language === "ko" ? "예: 산책하고 카페에서 책 읽음. 생각보다 컨디션 좋았음." : "Ex: Took a walk and read at a cafe. Felt better than expected."}
+              rows={5}
+            />
+            <div className={styles.dailyNoteFooter}>
+              <span>{language === "ko" ? `${draftNote.trim().length}자` : `${draftNote.trim().length} chars`}</span>
+              <div>
+                {selectedDailyNote && (
+                  <button type="button" onClick={() => { setDraftNote(selectedNote); setIsEditingNote(false); }}>
+                    {language === "ko" ? "취소" : "Cancel"}
+                  </button>
+                )}
+                <button type="button" className={styles.dailyNoteSaveButton} onClick={saveNote}>
+                  {language === "ko" ? "저장" : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <article className={styles.dailyNoteRead}>
+            {selectedNote.split("\n").map((line, index) => (
+              <p key={`${selectedDate}-line-${index}`}>{line || "\u00a0"}</p>
+            ))}
+          </article>
+        )}
         {monthlyDailyNotes.length > 0 && (
           <div className={styles.monthNoteList}>
             <strong>{language === "ko" ? "이번 달에 쓴 기록" : "Notes This Month"}</strong>
@@ -3242,21 +3646,26 @@ function getTabViewParam(tab: AppTab) {
 }
 
 
-function loadAppSettings(): { language: AppLanguage; fontMode: FontMode } {
+function loadAppSettings(): AppSettings {
   try {
     const rawValue = window.localStorage.getItem(appSettingsStorageKey);
-    if (!rawValue) return { language: "ko", fontMode: "default" };
-    const parsed = JSON.parse(rawValue) as Partial<{ language: AppLanguage; fontMode: FontMode }>;
+    if (!rawValue) return { language: "ko", fontMode: "default", enabledFeatures: defaultEnabledFeatures };
+    const parsed = JSON.parse(rawValue) as Partial<AppSettings>;
     return {
       language: parsed.language === "en" ? "en" : "ko",
-      fontMode: parsed.fontMode === "system" ? "system" : "default"
+      fontMode: parsed.fontMode === "system" ? "system" : "default",
+      enabledFeatures: {
+        words: parsed.enabledFeatures?.words === true,
+        pomodoro: parsed.enabledFeatures?.pomodoro === true,
+        memo: parsed.enabledFeatures?.memo === true
+      }
     };
   } catch {
-    return { language: "ko", fontMode: "default" };
+    return { language: "ko", fontMode: "default", enabledFeatures: defaultEnabledFeatures };
   }
 }
 
-function saveAppSettings(settings: { language: AppLanguage; fontMode: FontMode }) {
+function saveAppSettings(settings: AppSettings) {
   try {
     window.localStorage.setItem(appSettingsStorageKey, JSON.stringify(settings));
   } catch {
@@ -3414,16 +3823,6 @@ async function deleteAppData(language: AppLanguage, onDeleted: (createdAt: strin
   } finally {
     onDeleted(recoveryCreatedAt);
   }
-}
-
-function formatSyncTime(value: string) {
-  return new Date(value).toLocaleString("ko-KR", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  });
 }
 
 function formatDailyNoteSavedAt(value: string) {

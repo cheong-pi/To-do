@@ -252,6 +252,14 @@
   transform: translateY(-1px);
 }
 
+.titleNav .todayNavButton {
+  width: auto;
+  padding: 0 12px;
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
 .listMeta {
   display: flex;
   justify-content: flex-end;
@@ -481,25 +489,19 @@
   line-height: 1.45;
 }
 
+.settingsButtonGroup {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .syncScope {
   display: block;
   margin-top: 7px;
   color: var(--color-subtle);
   font-size: 0.78rem;
   line-height: 1.45;
-}
-
-.driveConflictNotice {
-  display: block;
-  margin-top: 9px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--color-brand) 70%, var(--color-line));
-  border-radius: 10px;
-  background: var(--color-brand-softer);
-  color: var(--color-text);
-  font-size: 0.8rem;
-  font-weight: 800;
-  line-height: 1.4;
 }
 
 .installChecklist {
@@ -572,6 +574,69 @@
   box-shadow: 0 4px 14px -8px rgba(120, 90, 30, 0.65);
 }
 
+.featureToggleList {
+  display: grid;
+  min-width: 210px;
+  gap: 8px;
+}
+
+.featureToggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0 42px;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.featureToggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.featureToggle i {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-line-soft);
+  transition: background 0.18s ease;
+}
+
+.featureToggle i::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: 0 1px 4px rgba(80, 60, 20, 0.2);
+  content: "";
+  transition: transform 0.18s ease;
+}
+
+.featureToggle input:checked + i {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+.featureToggle input:checked + i::after {
+  transform: translateX(18px);
+}
+
+.featureToggle input:focus-visible + i {
+  outline: 3px solid rgba(242, 194, 75, 0.58);
+  outline-offset: 2px;
+}
+
 .settingsAction {
   display: inline-flex;
   align-items: center;
@@ -610,6 +675,16 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.driveSyncControls {
+  display: grid;
+  min-width: min(100%, 420px);
+  gap: 10px;
+}
+
+.driveSyncControls .settingsActionGroup {
+  justify-content: flex-start;
 }
 
 .dangerAction {
@@ -1017,7 +1092,6 @@
 .editButton,
 .editorActions button,
 .editorHeader button,
-.progressStepper button,
 .completeButton,
 .deleteButton {
   min-height: 40px;
@@ -1031,7 +1105,6 @@
 .editButton:hover,
 .editorActions button:hover,
 .editorHeader button:hover,
-.progressStepper button:hover,
 .completeButton:hover,
 .deleteButton:hover {
   border-color: var(--color-brand);
@@ -1043,20 +1116,6 @@
   min-width: 62px;
   padding: 0 12px;
   font-weight: 800;
-}
-
-.readonlyLabel {
-  display: inline-flex;
-  min-height: 32px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 10px;
-  border-radius: var(--radius-pill);
-  background: var(--color-line-soft);
-  color: var(--color-muted);
-  font-size: 0.78rem;
-  font-weight: 900;
-  white-space: nowrap;
 }
 
 .headerActions {
@@ -1217,6 +1276,7 @@
 
 .formRow {
   display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -1230,6 +1290,7 @@
 .formRow input,
 .formRow select,
 .formRow textarea {
+  min-width: 0;
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--color-line);
@@ -1264,14 +1325,21 @@
 }
 
 .checkboxRow {
-  display: inline-flex;
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 40px;
   gap: 8px;
   align-items: center;
+  padding: 6px 2px;
+  line-height: 1.35;
 }
 
 .checkboxRow input {
+  flex: 0 0 auto;
   width: 18px;
   height: 18px;
+  margin: 0;
 }
 
 .tagBox {
@@ -1302,6 +1370,70 @@
   border-color: var(--color-brand);
   background: var(--color-brand-soft);
   transform: translateY(-1px);
+}
+
+.readOnlyScheduleBox {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-medium);
+  background: var(--color-surface-soft);
+}
+
+.readOnlyScheduleBox strong {
+  color: var(--color-ink);
+  font-size: 0.96rem;
+  font-weight: 800;
+}
+
+.readOnlyScheduleBox span {
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.progressBox {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-medium);
+  background: var(--color-surface-soft);
+}
+
+.progressBox > span {
+  color: var(--color-muted);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.progressStepper {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  gap: 6px;
+}
+
+.progressStepper button,
+.progressStepper input {
+  min-height: 38px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  text-align: center;
+}
+
+.progressStepper button {
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 900;
+}
+
+.progressStepper button:hover {
+  border-color: var(--color-brand);
+  background: var(--color-brand-soft);
 }
 
 .editorHeader button {
@@ -1335,19 +1467,15 @@
   gap: 8px;
 }
 
+.editorFooter button:only-child {
+  grid-column: 1 / -1;
+}
+
 .deleteButton {
   border-color: var(--color-danger-soft);
   background: var(--color-danger-soft);
   color: var(--color-danger);
   font-weight: 900;
-}
-
-.progressBox {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border-radius: var(--radius-medium);
-  background: var(--color-surface-soft);
 }
 
 .kindBox {
@@ -1458,19 +1586,6 @@
 
 .weekdayGrid .selectedWeekday {
   background: var(--color-brand);
-}
-
-.progressStepper {
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 42px;
-  gap: 6px;
-}
-
-.progressStepper input {
-  min-height: 38px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-small);
-  text-align: center;
 }
 
 .wordCountControl {
@@ -2260,6 +2375,27 @@
   background: color-mix(in srgb, var(--color-brand) 26%, var(--color-surface));
 }
 
+.noteCell {
+  border-color: color-mix(in srgb, var(--color-danger) 22%, var(--color-line-soft));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--color-danger) 10%, transparent), transparent 42%),
+    color-mix(in srgb, var(--color-surface) 94%, var(--color-brand-softer));
+}
+
+.selectedCell.noteCell {
+  border-color: var(--color-brand);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--color-danger) 12%, transparent), transparent 44%),
+    var(--color-brand-softer);
+}
+
+.completedCell.noteCell {
+  border-color: color-mix(in srgb, var(--color-brand) 72%, #7d5a10);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--color-danger) 10%, transparent), transparent 44%),
+    color-mix(in srgb, var(--color-brand) 26%, var(--color-surface));
+}
+
 .calendarDay {
   font-family: var(--font-display);
   font-size: 0.98rem;
@@ -2336,15 +2472,6 @@
   height: 100%;
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--color-brand) 86%, #6f4d0b);
-}
-
-.calendarNoteDot {
-  width: 6px;
-  height: 6px;
-  margin: 2px auto 0;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--color-danger) 72%, var(--color-brand));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger) 16%, transparent);
 }
 
 .calendarSelectedList {
@@ -2505,6 +2632,13 @@
   font-weight: 800;
 }
 
+.dailyNoteActions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .dailyNoteBox strong {
   color: var(--color-text);
   font-family: var(--font-display);
@@ -2538,6 +2672,58 @@
   border-color: var(--color-brand);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 28%, transparent);
   outline: none;
+}
+
+.dailyNoteEditor {
+  display: grid;
+  gap: 8px;
+}
+
+.dailyNoteFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dailyNoteFooter > div {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.dailyNoteFooter button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.dailyNoteFooter .dailyNoteSaveButton {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  color: var(--color-ink);
+}
+
+.dailyNoteRead {
+  display: grid;
+  gap: 8px;
+  min-height: 92px;
+  padding: 14px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-surface) 92%, var(--color-page));
+  color: var(--color-text);
+  line-height: 1.55;
+}
+
+.dailyNoteRead p {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .monthNoteList {
@@ -2672,21 +2858,29 @@
   }
 
   .tabs {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    gap: 2px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    position: static;
+    overflow: visible;
+    gap: 3px;
     padding: 5px;
-    scrollbar-width: none;
+    background: var(--color-surface);
+    backdrop-filter: none;
   }
 
-  .tabs::-webkit-scrollbar {
-    display: none;
+  .shell:focus-within .tabs {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
   }
 
   .tabs button {
-    min-width: max-content;
-    flex: 0 0 auto;
-    padding: 0 12px;
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    padding: 0 3px;
+    font-size: 0.78rem;
+    white-space: nowrap;
   }
 
   .taskRow {
@@ -2721,9 +2915,27 @@
     grid-template-columns: 1fr;
   }
 
+  .formRow input[type="date"],
+  .formRow input[type="time"] {
+    max-width: 100%;
+  }
+
+  .checkboxRow {
+    width: 100%;
+    min-height: 44px;
+    padding: 8px 4px;
+    border-radius: var(--radius-small);
+  }
+
   .titleNav {
     grid-template-columns: 32px minmax(0, 1fr) 32px auto;
     width: 100%;
+  }
+
+  .titleNav h2 {
+    min-width: 0;
+    font-size: 1.25rem;
+    text-align: center;
   }
 
   .sectionHeader {
@@ -2740,8 +2952,43 @@
     width: 100%;
   }
 
+  .createPanel {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .kindBox {
+    gap: 10px;
+    padding: 10px;
+  }
+
   .kindGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .kindButton {
+    min-height: 0;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .kindButton strong {
+    font-size: 0.86rem;
+    white-space: nowrap;
+  }
+
+  .kindButton span {
+    overflow: hidden;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .repeatBox {
+    padding: 10px;
   }
 
   .planBlock {
@@ -2762,6 +3009,11 @@
 
   .segmentControl button {
     flex: 1;
+  }
+
+  .featureToggleList {
+    width: 100%;
+    min-width: 0;
   }
 
   .settingsAction {
@@ -2798,7 +3050,14 @@
   }
 
   .colorGrid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(32px, 1fr));
+    gap: 8px;
+  }
+
+  .colorSwatch {
+    width: 100%;
+    min-width: 32px;
+    height: 32px;
   }
 
   .weekdayGrid {

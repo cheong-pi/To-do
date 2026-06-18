@@ -33,6 +33,8 @@ describe("scheduleStorage", () => {
         time: null,
         status: "planned",
         reminderAt: null,
+        progressPercent: 0,
+        remainingPercent: 100,
         memo: ""
       })
     ]);
@@ -61,6 +63,8 @@ function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
     time: "14:00",
     kind: "period",
     status: "planned",
+    progressPercent: 0,
+    remainingPercent: 100,
     reminderAt: "2026-06-11T14:00:00+09:00",
     linkedTaskId: null,
     createdAt: "2026-06-01T00:00:00.000Z",

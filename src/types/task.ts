@@ -66,6 +66,8 @@ export type Schedule = {
   time: string | null;
   kind: ScheduleKind;
   status: ScheduleStatus;
+  progressPercent?: number;
+  remainingPercent?: number;
   reminderAt?: string | null;
   calendarColor?: string;
   linkedTaskId?: string | null;

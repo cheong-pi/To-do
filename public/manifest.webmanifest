@@ -35,7 +35,7 @@
       "url": "/?view=tasks"
     },
     {
-      "name": "단어 학습",
+      "name": "단어학습",
       "short_name": "단어",
       "url": "/?view=words"
     }

@@ -12,38 +12,54 @@
 | 단어 학습 | 3,000단어 기반 학습 후 퀴즈, 누적 기록, 재노출 복습 |
 | 타이머 | 집중/휴식 시간과 반복 수 설정, 실행 상태 보존, 일별 집중 횟수 |
 | 메모 | 날짜 없이 자유 메모 저장 |
-| 설정 | 언어, 폰트, 알림, 설치, 백업/복원/삭제, Google Drive |
+| 설정 | 언어, 폰트, 선택 기능(단어 학습/타이머/메모) 표시, 웹/Android 알림, 설치, 로컬 백업/복원/삭제 |
 
 ## 저장 구조
 
-- 기본 저장소: 브라우저 `localStorage`
-- 선택 동기화: 각 사용자의 Google Drive `appDataFolder`
-- OAuth 토큰: `sessionStorage`, 브라우저 세션 종료 시 제거
+- 기본 저장소: 브라우저 또는 Android 앱 WebView의 `localStorage`
 - Git 제외: `.env`, `.env.*`, `dont-forget-backup-*.json`, `backups/`
 
-Firebase와 Firestore는 현재 사용하지 않습니다.
+Firebase, Firestore, Google Drive 동기화는 현재 사용하지 않습니다. 데이터는 각 기기의 브라우저에 독립적으로 저장됩니다.
 
 ## 데이터 안전 규칙
 
 1. 저장된 사용자 데이터는 초기 샘플 데이터로 덮어쓰지 않는다.
 2. 알림 시각을 포함한 기존 필드는 다시 열어도 유지한다.
 3. 백업 복원과 전체 삭제 전에 자동 복구 지점을 만든다.
-4. Drive 원격 데이터와 로컬 데이터가 다르면 자동 덮어쓰지 않는다.
-5. 스키마 변경 시 이전 데이터에 기본값을 주거나 명시적인 마이그레이션을 추가한다.
+4. 스키마 변경 시 이전 데이터에 기본값을 주거나 명시적인 마이그레이션을 추가한다.
+5. 브라우저 데이터 삭제와 기기 변경 전에 JSON 백업을 안내한다.
 
 ## 자동 검증
 
 - `npm test`: 저장/복구, 손상 데이터 정규화, 일정 날짜 범위, 오늘 할일 정렬
 - `npm run build`: TypeScript 검사와 프로덕션 번들 생성
-- 현재 기준: 테스트 파일 4개, 시나리오 13개
+- 현재 기준: 테스트 파일 7개, 시나리오 21개
 
 기능 변경을 완료하려면 두 명령이 모두 성공해야 한다.
 
 ## 남은 외부 설정
 
-- Google Cloud OAuth 클라이언트 ID 발급
-- 실제 HTTPS 주소를 승인된 JavaScript 원본에 등록
 - HTTPS 호스팅 배포
-- 실제 Windows/Android/iOS 설치 및 알림 권한 테스트
+- Android Studio와 Android SDK 설치
+- Android 실기기에서 알림 권한, 정각 알림 권한, 앱 종료 후 알림 테스트
+- 실제 Windows/iOS 설치 및 알림 권한 테스트
 
 이 항목은 코드만으로 완료할 수 없으며 배포 계정과 실기기 검증이 필요합니다.
+
+## Android 네이티브 앱
+
+- Capacitor 앱 ID: `com.dontforget.app`
+- 네이티브 프로젝트: `android/`
+- 로컬 알림: `@capacitor/local-notifications`
+- 예약 범위: 현재 시점부터 60일
+- D-day: 마감 당일에만 알림
+- 반복 할일: 반복 규칙에 해당하는 날짜만 알림
+- 기간 일정: 시작일부터 종료일까지 시간이 있는 날짜에 알림
+- 할일/일정 수정·완료·취소·삭제 시 대기 중인 알림 목록을 최신 데이터로 재구성
+
+동기화와 실행:
+
+```powershell
+npm run android:sync
+npm run android:open
+```
