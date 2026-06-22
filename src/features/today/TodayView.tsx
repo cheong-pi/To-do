@@ -7,6 +7,7 @@ import { loadStoredSchedules, saveStoredSchedules } from "../../services/schedul
 import { loadStoredTasks, saveStoredTasks } from "../../services/taskStorage";
 import { getLocalRecovery, restoreLocalRecovery, saveLocalRecovery } from "../../services/dataRecovery";
 import { appDataStorageKeys } from "../../services/appDataStorage";
+import { consumeAndroidWidgetActions, syncAndroidWidget } from "../../services/widgetSync";
 import {
   connectGoogleDrive,
   disconnectGoogleDrive,
@@ -193,6 +194,7 @@ export function TodayView() {
   const [notificationPermission, setNotificationPermission] = useState<ReminderPermission>(() => getNotificationPermission());
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [dataResetToken, setDataResetToken] = useState(0);
+  const [storageRevision, setStorageRevision] = useState(0);
   const [hasOpenedWords, setHasOpenedWords] = useState(false);
   const [hasOpenedPomodoro, setHasOpenedPomodoro] = useState(false);
   const [hasOpenedMemo, setHasOpenedMemo] = useState(false);
@@ -235,6 +237,10 @@ export function TodayView() {
   );
   const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
   const fixedTaskTags = useMemo(() => getFixedTaskTags(tasks), [tasks]);
+  const planReminders = useMemo(
+    () => loadStoredPlanBlocks().map((block) => ({ id: block.id, title: block.title, startTime: block.startTime })),
+    [storageRevision]
+  );
   const visibleTabs = useMemo(
     () =>
       tabs.filter((tab) => {
@@ -320,6 +326,80 @@ export function TodayView() {
   }, [dailyNotes]);
 
   useEffect(() => {
+    const widgetItems = reminderTasks
+      .filter((task) => task.status !== "cancelled")
+      .map((task) => ({
+        id: task.id,
+        title: task.title,
+        time: task.time,
+        done: isTaskDoneOnDate(task, currentDateKey),
+        owner: task.owner === "schedule" ? ("schedule" as const) : ("task" as const),
+        scheduleId: task.scheduleId ?? null,
+        repeat: isRepeatTask(task)
+      }));
+    const dateLabel = `${formatDateHeading(currentDateKey, appLanguage)} ${appLanguage === "ko" ? "할일" : "Tasks"}`;
+    void syncAndroidWidget(currentDateKey, dateLabel, widgetItems);
+  }, [reminderTasks, currentDateKey, appLanguage]);
+
+  useEffect(() => {
+    const consumeWidgetActions = async () => {
+      const actions = await consumeAndroidWidgetActions();
+      if (actions.length === 0) return;
+
+      const latestActions = new Map(actions.map((action) => [`${action.id}:${action.date}`, action]));
+      setTasks((current) =>
+        current.map((task) => {
+          const action = latestActions.get(`${task.id}:${currentDateKey}`) ?? latestActions.get(`${task.id}:${selectedDate}`);
+          if (!action || action.owner === "schedule") return task;
+
+          if (action.repeat) {
+            const completedDates = task.completedDates ?? [];
+            const nextDates = action.done
+              ? Array.from(new Set([...completedDates, action.date])).sort()
+              : completedDates.filter((date) => date !== action.date);
+            return { ...task, completedDates: nextDates };
+          }
+
+          return {
+            ...task,
+            status: action.done ? "done" : "planned",
+            progressPercent: action.done ? 100 : 0,
+            remainingPercent: action.done ? 0 : 100,
+            completedAt: action.done ? new Date().toISOString() : null
+          };
+        })
+      );
+      setSchedules((current) =>
+        current.map((schedule) => {
+          const action = Array.from(latestActions.values()).find(
+            (candidate) => candidate.owner === "schedule" && candidate.scheduleId === schedule.id
+          );
+          if (!action) return schedule;
+          return {
+            ...schedule,
+            status: action.done ? "done" : "planned",
+            progressPercent: action.done ? 100 : 0,
+            remainingPercent: action.done ? 0 : 100,
+            updatedAt: new Date().toISOString()
+          };
+        })
+      );
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void consumeWidgetActions();
+    };
+
+    void consumeWidgetActions();
+    window.addEventListener("focus", consumeWidgetActions);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", consumeWidgetActions);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [currentDateKey, selectedDate]);
+
+  useEffect(() => {
     saveGoogleDriveClientId(googleClientId);
     setDriveSyncStatus((current) => {
       if (hasGoogleDriveToken()) return current;
@@ -372,6 +452,7 @@ export function TodayView() {
 
   useEffect(() => {
     const scheduleDriveUpload = () => {
+      setStorageRevision((current) => current + 1);
       if (!hasGoogleDriveToken()) return;
       if (!hasCompletedInitialDriveCheck.current) return;
       if (driveUploadTimer.current) window.clearTimeout(driveUploadTimer.current);
@@ -391,8 +472,8 @@ export function TodayView() {
 
   useEffect(() => {
     if (!usesNativeNotifications || notificationPermission !== "granted") return;
-    void syncNativeNotifications(tasks, schedules, appLanguage);
-  }, [tasks, schedules, appLanguage, notificationPermission, usesNativeNotifications]);
+    void syncNativeNotifications(tasks, schedules, appLanguage, planReminders);
+  }, [tasks, schedules, appLanguage, notificationPermission, usesNativeNotifications, planReminders]);
 
   useEffect(() => {
     if (usesNativeNotifications) return;

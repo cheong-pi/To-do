@@ -8,6 +8,12 @@ import type { RepeatKind, Schedule, Task } from "../types/task";
 
 type AppLanguage = "ko" | "en";
 
+export type PlanReminder = {
+  id: string;
+  title: string;
+  startTime: string;
+};
+
 const channelId = "task-reminders";
 const scheduleHorizonDays = 60;
 const maxScheduledNotifications = 128;
@@ -49,14 +55,14 @@ export async function showNativeTestNotification(language: AppLanguage) {
   });
 }
 
-export function syncNativeNotifications(tasks: Task[], schedules: Schedule[], language: AppLanguage) {
+export function syncNativeNotifications(tasks: Task[], schedules: Schedule[], language: AppLanguage, planReminders: PlanReminder[] = []) {
   notificationSync = notificationSync
     .catch(() => undefined)
-    .then(() => replaceNativeNotifications(tasks, schedules, language));
+    .then(() => replaceNativeNotifications(tasks, schedules, language, planReminders));
   return notificationSync;
 }
 
-async function replaceNativeNotifications(tasks: Task[], schedules: Schedule[], language: AppLanguage) {
+async function replaceNativeNotifications(tasks: Task[], schedules: Schedule[], language: AppLanguage, planReminders: PlanReminder[]) {
   if (!isNativeNotificationPlatform()) return;
 
   const permission = await LocalNotifications.checkPermissions();
@@ -71,7 +77,7 @@ async function replaceNativeNotifications(tasks: Task[], schedules: Schedule[], 
     });
   }
 
-  const notifications = buildNativeNotificationPlan(tasks, schedules, new Date(), language);
+  const notifications = buildNativeNotificationPlan(tasks, schedules, new Date(), language, planReminders);
 
   if (notifications.length > 0) {
     await LocalNotifications.schedule({ notifications });
@@ -82,14 +88,23 @@ export function buildNativeNotificationPlan(
   tasks: Task[],
   schedules: Schedule[],
   now: Date,
-  language: AppLanguage
+  language: AppLanguage,
+  planReminders: PlanReminder[] = []
 ) {
   return [
     ...tasks.flatMap((task) => buildTaskNotifications(task, now, language)),
-    ...schedules.flatMap((schedule) => buildScheduleNotifications(schedule, now, language))
+    ...schedules.flatMap((schedule) => buildScheduleNotifications(schedule, now, language)),
+    ...planReminders.flatMap((reminder) => buildPlanNotifications(reminder, now, language))
   ]
     .sort((a, b) => (a.schedule?.at?.getTime() ?? 0) - (b.schedule?.at?.getTime() ?? 0))
     .slice(0, maxScheduledNotifications);
+}
+
+function buildPlanNotifications(reminder: PlanReminder, now: Date, language: AppLanguage) {
+  if (!/^\d{2}:\d{2}$/.test(reminder.startTime)) return [];
+  return datesInHorizon(now)
+    .slice(0, 30)
+    .flatMap((date) => notificationForDate("plan", reminder.id, reminder.title, atTime(dateKey(date), reminder.startTime), now, language));
 }
 
 function buildTaskNotifications(task: Task, now: Date, language: AppLanguage): LocalNotificationSchema[] {
@@ -159,7 +174,7 @@ function buildScheduleNotifications(schedule: Schedule, now: Date, language: App
 }
 
 function notificationForDate(
-  owner: "task" | "schedule",
+  owner: "task" | "schedule" | "plan",
   ownerId: string,
   title: string,
   at: Date,

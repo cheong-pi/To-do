@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_text">#211B08</color>
+    <color name="widget_muted_text">#7A7053</color>
+    <color name="widget_done_text">#9A9278</color>
+</resources>
